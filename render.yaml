@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: anwar-kpiflow
+    runtime: node
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /
+    autoDeploy: true
+    disk:
+      name: kpiflow-data
+      mountPath: /opt/render/project/src/.data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.1
+      - key: ANTHROPIC_API_KEY
+        sync: false

@@ -1,26 +1,84 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* Deviation scale: teal at/above target, oxide below, ochre not yet measured. */
+@theme {
+  --color-ground: #e7ebed;
+  --color-paper: #ffffff;
+
+  --color-ink: #101d24;
+  --color-ink2: #3f545f;
+  --color-ink3: #6b8290;
+  --color-rule: #cbd6db;
+  --color-rule2: #e2e9ec;
+
+  /* At or above target */
+  --color-datum: #0b6b60;
+  --color-datum-soft: #e0efed;
+
+  /* Below target */
+  --color-dev: #a83a16;
+  --color-dev-soft: #fbeae3;
+
+  /* Awaiting a result or an approval */
+  --color-signal: #9a6206;
+  --color-signal-soft: #fbf0dc;
+
+  /* Locked, corrected, adjusted — the controlled-process colour */
+  --color-lock: #3d3a6b;
+  --color-lock-soft: #eaeaf4;
+
+  --font-display: var(--ff-display), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--ff-mono), ui-monospace, monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+html {
+  -webkit-text-size-adjust: 100%;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* Drafting-paper ground: 40px major grid, 8px minor. */
+body {
+  background-color: var(--color-ground);
+  background-image:
+    linear-gradient(to right, rgb(16 29 36 / 0.038) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(16 29 36 / 0.038) 1px, transparent 1px),
+    linear-gradient(to right, rgb(16 29 36 / 0.013) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(16 29 36 / 0.013) 1px, transparent 1px);
+  background-size:
+    40px 40px,
+    40px 40px,
+    8px 8px,
+    8px 8px;
+  color: var(--color-ink);
+  font-family: var(--font-display);
+}
+
+/* Figures. */
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'zero' 1;
+  letter-spacing: -0.01em;
+}
+
+/* Field names, eyebrows, column heads. */
+.label {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+:focus-visible {
+  outline: 2px solid var(--color-datum);
+  outline-offset: 2px;
 }
