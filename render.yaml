@@ -13,8 +13,9 @@ services:
       - key: ANTHROPIC_API_KEY
         sync: false
       # Postgres (Supabase project: anwar-kpiflow, ap-south-1). Use the
-      # Session pooler connection string — this is a persistent Node server,
-      # not serverless, so the transaction pooler (port 6543) is the wrong mode.
+      # TRANSACTION pooler connection string (port 6543), not the session
+      # pooler (5432) — this app's queries fan out concurrently, and session
+      # mode exhausts the free tier's small shared connection pool fast.
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_URL

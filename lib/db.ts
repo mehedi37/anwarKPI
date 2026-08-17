@@ -6,7 +6,14 @@ function pool(): Pool {
   if (_pool) return _pool;
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error('DATABASE_URL is not set.');
-  _pool = new Pool({ connectionString });
+  // DATABASE_URL should point at Supabase's Transaction pooler (port 6543),
+  // not the Session pooler (5432): several queries in this app fan out
+  // concurrently (Promise.all in dashboard()/getRecord()), and session mode
+  // holds a backend connection for a client's whole lifetime rather than
+  // releasing it between queries — it exhausts the free tier's small shared
+  // pool fast. `max` is kept low since transaction-mode pooling means this
+  // app doesn't need many concurrent client-side connections to stay fast.
+  _pool = new Pool({ connectionString, max: 5 });
   return _pool;
 }
 
