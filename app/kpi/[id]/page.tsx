@@ -25,11 +25,11 @@ export default async function RecordPage({
 }) {
   const { id } = await params;
   const { error } = await searchParams;
-  const record = getRecord(Number(id));
+  const record = await getRecord(Number(id));
   if (!record) notFound();
 
   const user = await currentUser();
-  const trail = auditTrail(record.id);
+  const trail = await auditTrail(record.id);
   const locked = record.state === 'approved' || record.state === 'corrected';
 
   const canReview = CAN.review(user) && !locked && record.reviewer.id === user.id;

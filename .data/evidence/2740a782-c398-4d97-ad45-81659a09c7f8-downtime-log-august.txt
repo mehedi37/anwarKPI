@@ -1,0 +1,11 @@
+ANWAR GROUP — Production Line Downtime Log
+Period: August 2026 | Line: PL-02
+
+Date        Reason                    Hours
+2026-08-03  Scheduled maintenance      4.0
+2026-08-09  Motor bearing failure      9.5
+2026-08-17  Power interruption         3.0
+2026-08-22  Conveyor jam               6.0
+2026-08-28  Scheduled maintenance      3.5
+                                      -----
+TOTAL DOWNTIME                         26.0 hours

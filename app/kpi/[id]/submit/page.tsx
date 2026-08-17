@@ -13,10 +13,10 @@ export default async function SubmitPage({
 }) {
   const { id } = await params;
   const { error } = await searchParams;
-  const record = getRecord(Number(id));
+  const record = await getRecord(Number(id));
   if (!record) notFound();
 
-  const samples = sampleEvidence();
+  const samples = await sampleEvidence();
   const locked = record.state === 'approved' || record.state === 'corrected';
 
   return (

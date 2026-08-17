@@ -15,16 +15,19 @@ export default async function SummaryPage({
 }) {
   const user = await currentUser();
   const sp = await searchParams;
-  const all = periods();
-  const staff = employees();
+  const all = await periods();
+  const staff = await employees();
 
   const employeeId =
     user.role === 'employee' ? user.id : Number(sp.employee ?? staff[0]?.id ?? user.id);
-  const period = all.find((p) => String(p.id) === sp.period) ?? currentPeriod();
+  const period = all.find((p) => String(p.id) === sp.period) ?? (await currentPeriod());
   const prev = all.filter((p) => p.id < period.id).at(-1) ?? null;
 
-  const { records, total } = employeeTotal(employeeId, period.id);
-  const prevTotal = prev ? employeeTotal(employeeId, prev.id).total : null;
+  const { records, total } = await employeeTotal(employeeId, period.id);
+  const prevTotal = prev ? (await employeeTotal(employeeId, prev.id)).total : null;
+  const totalsByPeriod = new Map(
+    await Promise.all(all.map(async (p) => [p.id, (await employeeTotal(employeeId, p.id)).total] as const)),
+  );
 
   const current = pctOf(total.score, total.scored_weight);
   const previous = prevTotal ? pctOf(prevTotal.score, prevTotal.scored_weight) : null;
@@ -206,7 +209,7 @@ export default async function SummaryPage({
           <p className="mt-1 text-sm text-ink3">Weighted score, comparable because targets are frozen.</p>
           <ul className="mt-4 space-y-3">
             {all.map((p) => {
-              const t = employeeTotal(employeeId, p.id).total;
+              const t = totalsByPeriod.get(p.id)!;
               const v = pctOf(t.score, t.scored_weight);
               return (
                 <li key={p.id}>

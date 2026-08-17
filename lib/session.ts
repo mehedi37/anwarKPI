@@ -1,5 +1,6 @@
 import { cookies } from 'next/headers';
-import { db } from './db';
+import { all, one } from './db';
+import { ensureSeeded } from './seed';
 import type { User } from './roles';
 
 export type { Role, User } from './roles';
@@ -17,24 +18,23 @@ const SELECT_USER = `SELECT e.id, e.name, e.title, e.role, e.dept_id,
  * resets would have less to show against the actual criteria.
  */
 export async function currentUser(): Promise<User> {
+  await ensureSeeded();
   const store = await cookies();
   const raw = store.get('uid')?.value;
   const id = raw ? Number(raw) : 1;
   return getUser(Number.isFinite(id) ? id : 1);
 }
 
-export function getUser(id: number): User {
-  const row = db().prepare(`${SELECT_USER} WHERE e.id = ?`).get(id) as User | undefined;
+export async function getUser(id: number): Promise<User> {
+  const row = await one<User>(`${SELECT_USER} WHERE e.id = ?`, [id]);
   if (row) return row;
-  return db().prepare(`${SELECT_USER} ORDER BY e.id LIMIT 1`).get() as User;
+  return (await one<User>(`${SELECT_USER} ORDER BY e.id LIMIT 1`))!;
 }
 
-export function allUsers(): User[] {
-  return db()
-    .prepare(
-      `${SELECT_USER}
-       ORDER BY CASE e.role WHEN 'employee' THEN 1 WHEN 'manager' THEN 2
-                            WHEN 'approver' THEN 3 ELSE 4 END, e.name`,
-    )
-    .all() as User[];
+export async function allUsers(): Promise<User[]> {
+  return all<User>(
+    `${SELECT_USER}
+     ORDER BY CASE e.role WHEN 'employee' THEN 1 WHEN 'manager' THEN 2
+                          WHEN 'approver' THEN 3 ELSE 4 END, e.name`,
+  );
 }

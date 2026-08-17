@@ -7,9 +7,9 @@ import { Button, Card, KeyCard, LinkButton, Measure, ToleranceRail } from '@/com
 
 export default async function Home() {
   const user = await currentUser();
-  const period = currentPeriod();
-  const d = dashboard(period.id);
-  const hero = completedRecord(period.id);
+  const period = await currentPeriod();
+  const d = await dashboard(period.id);
+  const hero = await completedRecord(period.id);
 
   return (
     <>

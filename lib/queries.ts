@@ -1,4 +1,4 @@
-import { db } from './db';
+import { all, one } from './db';
 import { computeAchievement, computeWeightedTotal, type KpiType, type Milestone } from './scoring';
 import { latestSuggestion, type Suggestion } from './ai';
 
@@ -90,68 +90,63 @@ export type KpiRecord = {
   ai: Suggestion | null;
 };
 
-export function periods(): Period[] {
-  return db().prepare(`SELECT * FROM period ORDER BY id`).all() as Period[];
+export async function periods(): Promise<Period[]> {
+  return all<Period>(`SELECT * FROM period ORDER BY id`);
 }
 
-export function currentPeriod(): Period {
-  return db().prepare(`SELECT * FROM period WHERE status='open' ORDER BY id DESC LIMIT 1`).get() as Period;
+export async function currentPeriod(): Promise<Period> {
+  return (await one<Period>(`SELECT * FROM period WHERE status='open' ORDER BY id DESC LIMIT 1`))!;
 }
 
-export function getRecord(id: number): KpiRecord | null {
-  const conn = db();
-  const k = conn
-    .prepare(
-      `SELECT a.*, e.name AS emp_name, e.title AS emp_title, d.name AS dept_name,
-              r.name AS reviewer_name, ap.name AS approver_name, lk.name AS locked_by_name
-       FROM kpi_assignment a
-       JOIN employee e ON e.id = a.employee_id
-       LEFT JOIN department d ON d.id = e.dept_id
-       JOIN employee r ON r.id = a.reviewer_id
-       JOIN employee ap ON ap.id = a.approver_id
-       LEFT JOIN employee lk ON lk.id = a.locked_by
-       WHERE a.id = ?`,
-    )
-    .get(id) as Record<string, unknown> | undefined;
+export async function getRecord(id: number): Promise<KpiRecord | null> {
+  const k = await one<Record<string, unknown>>(
+    `SELECT a.*, e.name AS emp_name, e.title AS emp_title, d.name AS dept_name,
+            r.name AS reviewer_name, ap.name AS approver_name, lk.name AS locked_by_name
+     FROM kpi_assignment a
+     JOIN employee e ON e.id = a.employee_id
+     LEFT JOIN department d ON d.id = e.dept_id
+     JOIN employee r ON r.id = a.reviewer_id
+     JOIN employee ap ON ap.id = a.approver_id
+     LEFT JOIN employee lk ON lk.id = a.locked_by
+     WHERE a.id = ?`,
+    [id],
+  );
   if (!k) return null;
 
-  const period = conn.prepare(`SELECT * FROM period WHERE id = ?`).get(k.period_id) as Period;
+  const period = (await one<Period>(`SELECT * FROM period WHERE id = ?`, [k.period_id]))!;
 
-  const entry = conn
-    .prepare(`SELECT * FROM actual_entry WHERE kpi_assignment_id = ? ORDER BY id DESC LIMIT 1`)
-    .get(id) as Record<string, unknown> | undefined;
+  const entry = await one<Record<string, unknown>>(
+    `SELECT * FROM actual_entry WHERE kpi_assignment_id = ? ORDER BY id DESC LIMIT 1`,
+    [id],
+  );
 
   const evidence = entry
-    ? (conn
-        .prepare(
-          `SELECT id, filename, file_ref, mime, uploaded_at FROM evidence
-           WHERE actual_entry_id = ? ORDER BY id`,
-        )
-        .all(entry.id) as EvidenceFile[])
+    ? await all<EvidenceFile>(
+        `SELECT id, filename, file_ref, mime, uploaded_at FROM evidence
+         WHERE actual_entry_id = ? ORDER BY id`,
+        [entry.id],
+      )
     : [];
 
-  const rubric = conn
-    .prepare(
-      `SELECT level, label, criteria_text, achievement_pct FROM rubric_level
-       WHERE kpi_assignment_id = ? ORDER BY level DESC`,
-    )
-    .all(id) as RubricLevel[];
+  const rubric = await all<RubricLevel>(
+    `SELECT level, label, criteria_text, achievement_pct FROM rubric_level
+     WHERE kpi_assignment_id = ? ORDER BY level DESC`,
+    [id],
+  );
 
-  const milestones = conn
-    .prepare(
-      `SELECT title, sub_weight, due_date, completed_date FROM milestone
-       WHERE kpi_assignment_id = ? ORDER BY due_date`,
-    )
-    .all(id) as Milestone[];
+  const milestones = await all<Milestone>(
+    `SELECT title, sub_weight, due_date, completed_date FROM milestone
+     WHERE kpi_assignment_id = ? ORDER BY due_date`,
+    [id],
+  );
 
-  const history = conn
-    .prepare(
-      `SELECT s.id, s.calculated_pct, s.final_pct, s.formula, s.formula_version,
-              s.cap_applied, s.adjusted, s.reason, s.created_at, e.name AS created_by_name
-       FROM score s LEFT JOIN employee e ON e.id = s.created_by
-       WHERE s.kpi_assignment_id = ? ORDER BY s.id DESC`,
-    )
-    .all(id) as ScoreRow[];
+  const history = await all<ScoreRow>(
+    `SELECT s.id, s.calculated_pct, s.final_pct, s.formula, s.formula_version,
+            s.cap_applied, s.adjusted, s.reason, s.created_at, e.name AS created_by_name
+     FROM score s LEFT JOIN employee e ON e.id = s.created_by
+     WHERE s.kpi_assignment_id = ? ORDER BY s.id DESC`,
+    [id],
+  );
 
   const current = history.find((h) => h.final_pct !== null || h.calculated_pct !== null) ?? history[0] ?? null;
 
@@ -207,16 +202,17 @@ export function getRecord(id: number): KpiRecord | null {
     formula: current?.formula ?? computed.formula,
     cap_applied: current ? current.cap_applied === 1 : computed.cap_applied,
 
-    ai: latestSuggestion(id),
+    ai: await latestSuggestion(id),
   };
 }
 
-function idsWhere(sql: string, params: unknown[]): KpiRecord[] {
-  const rows = db().prepare(sql).all(...params) as { id: number }[];
-  return rows.map((r) => getRecord(r.id)).filter((r): r is KpiRecord => r !== null);
+async function idsWhere(sql: string, params: unknown[]): Promise<KpiRecord[]> {
+  const rows = await all<{ id: number }>(sql, params);
+  const records = await Promise.all(rows.map((r) => getRecord(r.id)));
+  return records.filter((r): r is KpiRecord => r !== null);
 }
 
-export function recordsForEmployee(employeeId: number, periodId: number): KpiRecord[] {
+export async function recordsForEmployee(employeeId: number, periodId: number): Promise<KpiRecord[]> {
   return idsWhere(
     `SELECT id FROM kpi_assignment WHERE employee_id = ? AND period_id = ? ORDER BY id`,
     [employeeId, periodId],
@@ -224,7 +220,7 @@ export function recordsForEmployee(employeeId: number, periodId: number): KpiRec
 }
 
 /** Manager review queue: submitted or already under review, routed to this reviewer. */
-export function reviewQueue(reviewerId: number): KpiRecord[] {
+export async function reviewQueue(reviewerId: number): Promise<KpiRecord[]> {
   return idsWhere(
     `SELECT id FROM kpi_assignment
      WHERE reviewer_id = ? AND state IN ('submitted','under_review') ORDER BY id`,
@@ -233,7 +229,7 @@ export function reviewQueue(reviewerId: number): KpiRecord[] {
 }
 
 /** Approval queue: reviewed and routed to this approver. */
-export function approvalQueue(approverId: number): KpiRecord[] {
+export async function approvalQueue(approverId: number): Promise<KpiRecord[]> {
   return idsWhere(
     `SELECT id FROM kpi_assignment WHERE approver_id = ? AND state = 'under_review' ORDER BY id`,
     [approverId],
@@ -244,34 +240,32 @@ export function approvalQueue(approverId: number): KpiRecord[] {
  * A record with a complete chain — target through to a lock — for the overview
  * hero. The page leads with a real, finished measurement rather than a welcome.
  */
-export function completedRecord(periodId: number): KpiRecord | null {
-  const row = db()
-    .prepare(
-      `SELECT a.id FROM kpi_assignment a
-       JOIN score s ON s.kpi_assignment_id = a.id AND s.is_current = 1
-       WHERE a.period_id = ? AND a.state IN ('approved','corrected') AND s.final_pct IS NOT NULL
-       ORDER BY a.locked_at DESC LIMIT 1`,
-    )
-    .get(periodId) as { id: number } | undefined;
+export async function completedRecord(periodId: number): Promise<KpiRecord | null> {
+  const row = await one<{ id: number }>(
+    `SELECT a.id FROM kpi_assignment a
+     JOIN score s ON s.kpi_assignment_id = a.id AND s.is_current = 1
+     WHERE a.period_id = ? AND a.state IN ('approved','corrected') AND s.final_pct IS NOT NULL
+     ORDER BY a.locked_at DESC LIMIT 1`,
+    [periodId],
+  );
   return row ? getRecord(row.id) : null;
 }
 
-export function auditTrail(kpiId: number): AuditEntry[] {
-  return db()
-    .prepare(
-      `SELECT r.id, r.action, r.reason, r.at, e.name AS actor_name, e.role AS actor_role,
-              ps.final_pct AS prev_pct, ns.final_pct AS new_pct
-       FROM review_event r
-       JOIN employee e ON e.id = r.actor_id
-       LEFT JOIN score ps ON ps.id = r.prev_score_id
-       LEFT JOIN score ns ON ns.id = r.new_score_id
-       WHERE r.kpi_assignment_id = ? ORDER BY r.id`,
-    )
-    .all(kpiId) as AuditEntry[];
+export async function auditTrail(kpiId: number): Promise<AuditEntry[]> {
+  return all<AuditEntry>(
+    `SELECT r.id, r.action, r.reason, r.at, e.name AS actor_name, e.role AS actor_role,
+            ps.final_pct AS prev_pct, ns.final_pct AS new_pct
+     FROM review_event r
+     JOIN employee e ON e.id = r.actor_id
+     LEFT JOIN score ps ON ps.id = r.prev_score_id
+     LEFT JOIN score ns ON ns.id = r.new_score_id
+     WHERE r.kpi_assignment_id = ? ORDER BY r.id`,
+    [kpiId],
+  );
 }
 
-export function employeeTotal(employeeId: number, periodId: number) {
-  const records = recordsForEmployee(employeeId, periodId);
+export async function employeeTotal(employeeId: number, periodId: number) {
+  const records = await recordsForEmployee(employeeId, periodId);
   return {
     records,
     total: computeWeightedTotal(
@@ -280,14 +274,12 @@ export function employeeTotal(employeeId: number, periodId: number) {
   };
 }
 
-export function employees(): { id: number; name: string; title: string; dept: string | null }[] {
-  return db()
-    .prepare(
-      `SELECT e.id, e.name, e.title, d.name AS dept FROM employee e
-       LEFT JOIN department d ON d.id = e.dept_id
-       WHERE e.role = 'employee' ORDER BY e.name`,
-    )
-    .all() as { id: number; name: string; title: string; dept: string | null }[];
+export async function employees(): Promise<{ id: number; name: string; title: string; dept: string | null }[]> {
+  return all<{ id: number; name: string; title: string; dept: string | null }>(
+    `SELECT e.id, e.name, e.title, d.name AS dept FROM employee e
+     LEFT JOIN department d ON d.id = e.dept_id
+     WHERE e.role = 'employee' ORDER BY e.name`,
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -312,12 +304,11 @@ export type Dashboard = {
   trend: { label: string; avg: number | null }[];
 };
 
-export function dashboard(periodId: number): Dashboard {
-  const conn = db();
-  const period = conn.prepare(`SELECT * FROM period WHERE id = ?`).get(periodId) as Period;
+export async function dashboard(periodId: number): Promise<Dashboard> {
+  const period = (await one<Period>(`SELECT * FROM period WHERE id = ?`, [periodId]))!;
 
-  const all = idsWhere(`SELECT id FROM kpi_assignment WHERE period_id = ? ORDER BY id`, [periodId]);
-  const scored = all.filter((r) => !r.pending);
+  const allRecords = await idsWhere(`SELECT id FROM kpi_assignment WHERE period_id = ? ORDER BY id`, [periodId]);
+  const scored = allRecords.filter((r) => !r.pending);
 
   const avgAchievement = scored.length
     ? Math.round((scored.reduce((s, r) => s + (r.achievement_pct ?? 0), 0) / scored.length) * 10) / 10
@@ -325,7 +316,7 @@ export function dashboard(periodId: number): Dashboard {
 
   // Employee-level: how many people have every KPI approved.
   const byEmployee = new Map<number, KpiRecord[]>();
-  for (const r of all) {
+  for (const r of allRecords) {
     if (!byEmployee.has(r.employee.id)) byEmployee.set(r.employee.id, []);
     byEmployee.get(r.employee.id)!.push(r);
   }
@@ -335,7 +326,7 @@ export function dashboard(periodId: number): Dashboard {
   for (const [empId, recs] of byEmployee) {
     if (recs.every((r) => r.state === 'approved')) evaluated += 1;
     else pendingEmployees += 1;
-    const t = employeeTotal(empId, periodId).total;
+    const t = (await employeeTotal(empId, periodId)).total;
     if (t.scored_weight > 0) totals.push((t.score / t.scored_weight) * 100);
   }
   const avgScore = totals.length
@@ -343,10 +334,9 @@ export function dashboard(periodId: number): Dashboard {
     : null;
 
   // Departments
-  const deptRows = conn.prepare(`SELECT name, business_unit FROM department ORDER BY name`).all() as {
-    name: string;
-    business_unit: string;
-  }[];
+  const deptRows = await all<{ name: string; business_unit: string }>(
+    `SELECT name, business_unit FROM department ORDER BY name`,
+  );
   const departments = deptRows.map((d) => {
     const recs = scored.filter((r) => r.employee.dept === d.name);
     return {
@@ -360,17 +350,15 @@ export function dashboard(periodId: number): Dashboard {
   });
 
   // KPIs consistently below target: below 100% in 3+ consecutive periods.
-  const belowRows = conn
-    .prepare(
-      `SELECT a.name, e.name AS employee, p.id AS period_id, s.final_pct
-       FROM kpi_assignment a
-       JOIN employee e ON e.id = a.employee_id
-       JOIN period p ON p.id = a.period_id
-       JOIN score s ON s.kpi_assignment_id = a.id AND s.is_current = 1
-       WHERE s.final_pct IS NOT NULL
-       ORDER BY a.name, e.name, p.id`,
-    )
-    .all() as { name: string; employee: string; period_id: number; final_pct: number }[];
+  const belowRows = await all<{ name: string; employee: string; period_id: number; final_pct: number }>(
+    `SELECT a.name, e.name AS employee, p.id AS period_id, s.final_pct
+     FROM kpi_assignment a
+     JOIN employee e ON e.id = a.employee_id
+     JOIN period p ON p.id = a.period_id
+     JOIN score s ON s.kpi_assignment_id = a.id AND s.is_current = 1
+     WHERE s.final_pct IS NOT NULL
+     ORDER BY a.name, e.name, p.id`,
+  );
 
   const streaks = new Map<string, { name: string; employee: string; periods: number }>();
   for (const row of belowRows) {
@@ -383,44 +371,45 @@ export function dashboard(periodId: number): Dashboard {
   const belowTarget = [...streaks.values()].filter((s) => s.periods >= 3);
 
   const approvalsPending = (
-    conn
-      .prepare(
-        `SELECT COUNT(*) AS n FROM kpi_assignment
-         WHERE period_id = ? AND state IN ('submitted','under_review')`,
-      )
-      .get(periodId) as { n: number }
-  ).n;
-
-  const adjustments = conn
-    .prepare(
-      `SELECT a.id AS kpi_id, a.name AS kpi, emp.name AS employee,
-              s.calculated_pct AS "from", s.final_pct AS "to", s.reason, act.name AS by, s.created_at AS at
-       FROM score s
-       JOIN kpi_assignment a ON a.id = s.kpi_assignment_id
-       JOIN employee emp ON emp.id = a.employee_id
-       LEFT JOIN employee act ON act.id = s.created_by
-       WHERE s.adjusted = 1 AND a.period_id = ?
-       ORDER BY s.id DESC`,
+    await one<{ n: number }>(
+      `SELECT COUNT(*) AS n FROM kpi_assignment
+       WHERE period_id = ? AND state IN ('submitted','under_review')`,
+      [periodId],
     )
-    .all(periodId) as Dashboard['adjustments'];
+  )!.n;
 
-  const trend = (conn.prepare(`SELECT * FROM period ORDER BY id`).all() as Period[]).map((p) => {
-    const recs = idsWhere(`SELECT id FROM kpi_assignment WHERE period_id = ?`, [p.id]).filter(
-      (r) => !r.pending,
-    );
-    return {
-      label: p.label,
-      avg: recs.length
-        ? Math.round((recs.reduce((s, r) => s + (r.achievement_pct ?? 0), 0) / recs.length) * 10) / 10
-        : null,
-    };
-  });
+  const adjustments = await all<Dashboard['adjustments'][number]>(
+    `SELECT a.id AS kpi_id, a.name AS kpi, emp.name AS employee,
+            s.calculated_pct AS "from", s.final_pct AS "to", s.reason, act.name AS by, s.created_at AS at
+     FROM score s
+     JOIN kpi_assignment a ON a.id = s.kpi_assignment_id
+     JOIN employee emp ON emp.id = a.employee_id
+     LEFT JOIN employee act ON act.id = s.created_by
+     WHERE s.adjusted = 1 AND a.period_id = ?
+     ORDER BY s.id DESC`,
+    [periodId],
+  );
+
+  const allPeriods = await all<Period>(`SELECT * FROM period ORDER BY id`);
+  const trend = await Promise.all(
+    allPeriods.map(async (p) => {
+      const recs = (await idsWhere(`SELECT id FROM kpi_assignment WHERE period_id = ?`, [p.id])).filter(
+        (r) => !r.pending,
+      );
+      return {
+        label: p.label,
+        avg: recs.length
+          ? Math.round((recs.reduce((s, r) => s + (r.achievement_pct ?? 0), 0) / recs.length) * 10) / 10
+          : null,
+      };
+    }),
+  );
 
   return {
     period,
     evaluated,
     pending: pendingEmployees,
-    totalRecords: all.length,
+    totalRecords: allRecords.length,
     avgScore,
     avgAchievement,
     departments,
@@ -431,13 +420,11 @@ export function dashboard(periodId: number): Dashboard {
   };
 }
 
-export function sampleEvidence(): { id: number; filename: string; label: string }[] {
+export async function sampleEvidence(): Promise<{ id: number; filename: string; label: string }[]> {
   try {
-    return db().prepare(`SELECT id, filename, label FROM sample_evidence ORDER BY id`).all() as {
-      id: number;
-      filename: string;
-      label: string;
-    }[];
+    return await all<{ id: number; filename: string; label: string }>(
+      `SELECT id, filename, label FROM sample_evidence ORDER BY id`,
+    );
   } catch {
     return [];
   }

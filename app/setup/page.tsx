@@ -1,4 +1,4 @@
-import { db } from '@/lib/db';
+import { all } from '@/lib/db';
 import { employees, periods } from '@/lib/queries';
 import { currentUser, CAN } from '@/lib/session';
 import { Empty, ErrorBanner, PageHeader } from '@/components/ui';
@@ -20,22 +20,20 @@ export default async function SetupPage({
     );
   }
 
-  const staff = employees();
-  const allPeriods = periods();
+  const staff = await employees();
+  const allPeriods = await periods();
 
-  const reviewers = db()
-    .prepare(`SELECT id, name, role FROM employee WHERE role IN ('manager') ORDER BY name`)
-    .all() as { id: number; name: string; role: string }[];
-  const approvers = db()
-    .prepare(`SELECT id, name, role FROM employee WHERE role = 'approver' ORDER BY name`)
-    .all() as { id: number; name: string; role: string }[];
+  const reviewers = await all<{ id: number; name: string; role: string }>(
+    `SELECT id, name, role FROM employee WHERE role IN ('manager') ORDER BY name`,
+  );
+  const approvers = await all<{ id: number; name: string; role: string }>(
+    `SELECT id, name, role FROM employee WHERE role = 'approver' ORDER BY name`,
+  );
 
-  const rows = db()
-    .prepare(
-      `SELECT employee_id, period_id, SUM(weight) AS total
-       FROM kpi_assignment GROUP BY employee_id, period_id`,
-    )
-    .all() as { employee_id: number; period_id: number; total: number }[];
+  const rows = await all<{ employee_id: number; period_id: number; total: number }>(
+    `SELECT employee_id, period_id, SUM(weight) AS total
+     FROM kpi_assignment GROUP BY employee_id, period_id`,
+  );
 
   const usedWeight: Record<string, number> = {};
   for (const r of rows) usedWeight[`${r.employee_id}:${r.period_id}`] = r.total;

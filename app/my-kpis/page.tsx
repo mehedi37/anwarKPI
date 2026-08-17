@@ -11,9 +11,9 @@ export default async function MyKpis({
 }) {
   const user = await currentUser();
   const sp = await searchParams;
-  const all = periods();
-  const period = all.find((p) => String(p.id) === sp.period) ?? currentPeriod();
-  const { records, total } = employeeTotal(user.id, period.id);
+  const all = await periods();
+  const period = all.find((p) => String(p.id) === sp.period) ?? (await currentPeriod());
+  const { records, total } = await employeeTotal(user.id, period.id);
 
   const pctOfScored = total.scored_weight > 0 ? Math.round((total.score / total.scored_weight) * 1000) / 10 : null;
 

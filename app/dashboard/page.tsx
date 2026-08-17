@@ -19,9 +19,9 @@ export default async function DashboardPage({
   }
 
   const sp = await searchParams;
-  const all = periods();
-  const period = all.find((p) => String(p.id) === sp.period) ?? currentPeriod();
-  const d = dashboard(period.id);
+  const all = await periods();
+  const period = all.find((p) => String(p.id) === sp.period) ?? (await currentPeriod());
+  const d = await dashboard(period.id);
 
   const ranked = d.departments.filter((x) => x.avg !== null).sort((a, b) => (b.avg ?? 0) - (a.avg ?? 0));
   const best = ranked[0];

@@ -2,7 +2,6 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import './globals.css';
 import { display, mono } from './fonts';
-import { ensureSeeded } from '@/lib/seed';
 import { allUsers, currentUser, CAN, ROLE_LABEL } from '@/lib/session';
 import { RoleSwitcher } from '@/components/RoleSwitcher';
 
@@ -15,9 +14,8 @@ export const metadata: Metadata = {
 export const dynamic = 'force-dynamic';
 
 export default async function RootLayout({ children }: { children: React.ReactNode }) {
-  ensureSeeded();
   const user = await currentUser();
-  const users = allUsers();
+  const users = await allUsers();
 
   const nav = [
     { href: '/', label: 'Overview', show: true },

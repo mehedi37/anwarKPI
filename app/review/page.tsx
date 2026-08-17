@@ -15,7 +15,7 @@ export default async function ReviewPage() {
     );
   }
 
-  const queue = reviewQueue(user.id);
+  const queue = await reviewQueue(user.id);
   const flagged = queue.filter((r) => r.ai?.status === 'mismatch' && !r.ai.resolution);
 
   return (

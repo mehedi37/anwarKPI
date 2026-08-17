@@ -2,17 +2,24 @@ services:
   - type: web
     name: anwar-kpiflow
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm ci && npm run build
     startCommand: npm start
     healthCheckPath: /
     autoDeploy: true
-    disk:
-      name: kpiflow-data
-      mountPath: /opt/render/project/src/.data
-      sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: 20.18.1
       - key: ANTHROPIC_API_KEY
+        sync: false
+      # Postgres (Supabase project: anwar-kpiflow, ap-south-1). Use the
+      # Session pooler connection string — this is a persistent Node server,
+      # not serverless, so the transaction pooler (port 6543) is the wrong mode.
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        value: https://gpvuaivlzwbgrjivfmcm.supabase.co
+      # service_role secret key — server-side only, used to read/write the
+      # private "evidence" storage bucket. Never expose this to the browser.
+      - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false

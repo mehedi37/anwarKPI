@@ -96,8 +96,8 @@ The audit trail is not in the brief's list of screens, but "audit and control de
 └──────┬──────────────────────────┬───────────────────┘
        │                          │
 ┌──────▼──────────┐   ┌───────────▼───────────────────┐
-│  SQLite         │   │  Evidence file store          │
-│  11 tables      │   │  .data/evidence/              │
+│  Postgres       │   │  Evidence file store          │
+│  11 tables      │   │  Supabase Storage (private)   │
 └─────────────────┘   └───────────────────────────────┘
        ▲
        │  reads evidence + records, writes suggestions ONLY
@@ -108,9 +108,7 @@ The audit trail is not in the brief's list of screens, but "audit and control de
 └─────────────────────────────────────────────────────┘
 ```
 
-SQLite stands in for PostgreSQL so the prototype runs with no external service. The schema is ordinary relational SQL and moves across unchanged; the choice of a relational store is not incidental — an append-only audit trail and versioned scores need real transactional integrity and foreign keys.
-
-This does mean the app needs a writable disk, so it will not run on Vercel as-is. See [DEPLOYMENT.md](./DEPLOYMENT.md) for the options and the recommended host.
+Postgres (Supabase) and Supabase Storage hold all state — an append-only audit trail and versioned scores need real transactional integrity and foreign keys, and both survive restarts and redeploys, unlike anything written to Render's local disk. The app connects with a direct Postgres connection string and the Supabase service_role key; it does not use Supabase Auth or the client-side Data API, so Postgres RLS is enabled with no policies (deny by default) as defense in depth.
 
 ### Data model
 
@@ -233,7 +231,7 @@ Everything on that list can be added without changing the data model, which is t
 
 ## Known limitations
 
-- SQLite and local file storage suit a single-instance prototype; a deployment with more than one instance needs PostgreSQL and object storage. The schema and queries are unchanged by that swap.
+- Runs on Postgres (Supabase) and Supabase Storage, so it already tolerates multiple instances and restarts; the remaining single-instance assumption is `lib/actions.ts`'s in-process revalidation, not the data layer.
 - The AI evidence check has been written against the documented API and its unconfigured path is verified, but the live call was not exercised in the build environment (no API key available there).
 - Milestone completion is captured on the submission form by position, which is fine for a fixed milestone list and would need stable ids if milestones became editable after assignment.
 - Evidence retrieval is authorised (see above), but **record pages themselves are not scoped** — any signed-in role can open `/kpi/[id]` for any record. That is deliberate for a demo where you switch personas to walk the flow, and it is the first thing to close in a real deployment: the same routing check used for evidence applies directly to `getRecord`.

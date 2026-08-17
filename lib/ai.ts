@@ -1,7 +1,6 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import Anthropic from '@anthropic-ai/sdk';
-import { db, now, EVIDENCE_DIR } from './db';
+import { all, now, one, run } from './db';
+import { readEvidenceFile } from './evidence';
 
 /**
  * The one AI feature in v1: evidence verification.
@@ -64,13 +63,13 @@ async function extract(
   const content: Anthropic.ContentBlockParam[] = [];
 
   for (const f of files) {
-    const abs = path.join(EVIDENCE_DIR, f.ref);
-    if (!fs.existsSync(abs)) continue;
+    const buf = await readEvidenceFile(f.ref);
+    if (!buf) continue;
 
     if (f.mime === 'application/pdf') {
       content.push({
         type: 'document',
-        source: { type: 'base64', media_type: 'application/pdf', data: fs.readFileSync(abs).toString('base64') },
+        source: { type: 'base64', media_type: 'application/pdf', data: buf.toString('base64') },
         title: f.filename,
       });
     } else if (f.mime.startsWith('image/')) {
@@ -79,13 +78,13 @@ async function extract(
         source: {
           type: 'base64',
           media_type: f.mime as 'image/png' | 'image/jpeg' | 'image/gif' | 'image/webp',
-          data: fs.readFileSync(abs).toString('base64'),
+          data: buf.toString('base64'),
         },
       });
     } else {
       content.push({
         type: 'text',
-        text: `--- ${f.filename} ---\n${fs.readFileSync(abs, 'utf8').slice(0, 40_000)}`,
+        text: `--- ${f.filename} ---\n${buf.toString('utf8').slice(0, 40_000)}`,
       });
     }
   }
@@ -119,45 +118,42 @@ function agrees(claimed: number, found: number): boolean {
 }
 
 export async function verifyEvidence(kpiId: number): Promise<void> {
-  const conn = db();
-
-  const kpi = conn
-    .prepare(`SELECT id, name, unit, type FROM kpi_assignment WHERE id = ?`)
-    .get(kpiId) as { id: number; name: string; unit: string | null; type: string } | undefined;
+  const kpi = await one<{ id: number; name: string; unit: string | null; type: string }>(
+    `SELECT id, name, unit, type FROM kpi_assignment WHERE id = ?`,
+    [kpiId],
+  );
   if (!kpi) return;
 
-  const entry = conn
-    .prepare(
-      `SELECT id, value FROM actual_entry WHERE kpi_assignment_id = ? ORDER BY id DESC LIMIT 1`,
-    )
-    .get(kpiId) as { id: number; value: number | null } | undefined;
+  const entry = await one<{ id: number; value: number | null }>(
+    `SELECT id, value FROM actual_entry WHERE kpi_assignment_id = ? ORDER BY id DESC LIMIT 1`,
+    [kpiId],
+  );
 
   // Only numeric KPIs with a manual figure and at least one attachment are
   // checkable. Milestone and qualitative KPIs have no single number to verify.
   if (!entry || entry.value === null) return;
   if (kpi.type !== 'standard' && kpi.type !== 'inverse') return;
 
-  const files = conn
-    .prepare(`SELECT filename, mime, file_ref AS ref FROM evidence WHERE actual_entry_id = ?`)
-    .all(entry.id) as { filename: string; mime: string; ref: string }[];
+  const files = await all<{ filename: string; mime: string; ref: string }>(
+    `SELECT filename, mime, file_ref AS ref FROM evidence WHERE actual_entry_id = ?`,
+    [entry.id],
+  );
   if (files.length === 0) return;
 
   const record = (
     status: 'match' | 'mismatch' | 'not_found' | 'error',
     extracted: number | null,
     rationale: string,
-  ) => {
-    conn
-      .prepare(
-        `INSERT INTO ai_suggestion
-         (kpi_assignment_id, type, status, extracted_value, claimed_value, rationale, model_id, created_at)
-         VALUES (?, 'evidence_check', ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(kpiId, status, extracted, entry.value, rationale, MODEL, now());
-  };
+  ) =>
+    run(
+      `INSERT INTO ai_suggestion
+       (kpi_assignment_id, type, status, extracted_value, claimed_value, rationale, model_id, created_at)
+       VALUES (?, 'evidence_check', ?, ?, ?, ?, ?, ?)`,
+      [kpiId, status, extracted, entry.value, rationale, MODEL, now()],
+    );
 
   if (!aiConfigured()) {
-    record('error', null, 'AI verification is not configured (no ANTHROPIC_API_KEY set). The reviewer must check the attachment manually.');
+    await record('error', null, 'AI verification is not configured (no ANTHROPIC_API_KEY set). The reviewer must check the attachment manually.');
     return;
   }
 
@@ -165,14 +161,14 @@ export async function verifyEvidence(kpiId: number): Promise<void> {
     const result = await extract(files, kpi.name, kpi.unit, entry.value);
 
     if (!result.found || result.value === null) {
-      record('not_found', null, result.reasoning || 'No corresponding figure could be located in the attached evidence.');
+      await record('not_found', null, result.reasoning || 'No corresponding figure could be located in the attached evidence.');
       return;
     }
 
     const rationale = `${result.reasoning}${result.quote ? `\n\nFrom the document: "${result.quote.trim()}"` : ''}`;
-    record(agrees(entry.value, result.value) ? 'match' : 'mismatch', result.value, rationale);
+    await record(agrees(entry.value, result.value) ? 'match' : 'mismatch', result.value, rationale);
   } catch (err) {
-    record('error', null, `Verification could not be completed: ${(err as Error).message}`);
+    await record('error', null, `Verification could not be completed: ${(err as Error).message}`);
   }
 }
 
@@ -188,15 +184,14 @@ export type Suggestion = {
   resolved_by_name: string | null;
 };
 
-export function latestSuggestion(kpiId: number): Suggestion | null {
+export async function latestSuggestion(kpiId: number): Promise<Suggestion | null> {
   return (
-    (db()
-      .prepare(
-        `SELECT s.id, s.status, s.extracted_value, s.claimed_value, s.rationale,
-                s.model_id, s.created_at, s.resolution, e.name AS resolved_by_name
-         FROM ai_suggestion s LEFT JOIN employee e ON e.id = s.resolved_by
-         WHERE s.kpi_assignment_id = ? ORDER BY s.id DESC LIMIT 1`,
-      )
-      .get(kpiId) as Suggestion | undefined) ?? null
+    (await one<Suggestion>(
+      `SELECT s.id, s.status, s.extracted_value, s.claimed_value, s.rationale,
+              s.model_id, s.created_at, s.resolution, e.name AS resolved_by_name
+       FROM ai_suggestion s LEFT JOIN employee e ON e.id = s.resolved_by
+       WHERE s.kpi_assignment_id = ? ORDER BY s.id DESC LIMIT 1`,
+      [kpiId],
+    )) ?? null
   );
 }

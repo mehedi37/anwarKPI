@@ -1,7 +1,5 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { EVIDENCE_DIR } from '@/lib/db';
-import { canReadEvidence } from '@/lib/evidence';
+import { canReadEvidence, readEvidenceFile } from '@/lib/evidence';
 import { currentUser } from '@/lib/session';
 
 const TYPES: Record<string, string> = {
@@ -25,22 +23,20 @@ export async function GET(_req: Request, ctx: { params: Promise<{ ref: string }>
   // approver it is routed to, or HR. 404 rather than 403 so the response does
   // not confirm that a document exists to someone who may not see it.
   const viewer = await currentUser();
-  if (!canReadEvidence(viewer, name)) {
+  if (!(await canReadEvidence(viewer, name))) {
     return new Response('Not found', { status: 404 });
   }
 
-  // Second line of defence on the read path: confirm the resolved path is still
-  // inside the evidence directory before touching the filesystem.
-  const resolved = path.resolve(EVIDENCE_DIR, name);
-  if (!resolved.startsWith(path.resolve(EVIDENCE_DIR) + path.sep) || !fs.existsSync(resolved)) {
+  const body = await readEvidenceFile(name);
+  if (!body) {
     return new Response('Not found', { status: 404 });
   }
 
-  const ext = path.extname(resolved).toLowerCase();
-  return new Response(new Uint8Array(fs.readFileSync(resolved)), {
+  const ext = path.extname(name).toLowerCase();
+  return new Response(new Uint8Array(body), {
     headers: {
       'Content-Type': TYPES[ext] ?? 'application/octet-stream',
-      'Content-Disposition': `inline; filename="${path.basename(resolved)}"`,
+      'Content-Disposition': `inline; filename="${name}"`,
       // Review material must not be cached by shared proxies.
       'Cache-Control': 'private, no-store',
     },

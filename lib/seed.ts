@@ -1,5 +1,5 @@
-import { db, now, isSeeded } from './db';
-import { storeEvidenceFile } from './evidence';
+import { all, insertReturningId, isSeeded, now, one, resetAll, run, transaction, type Tx } from './db';
+import { clearEvidenceBucket, storeEvidenceFile } from './evidence';
 import { computeAchievement, FORMULA_VERSION, type KpiType, type Milestone } from './scoring';
 
 /**
@@ -91,42 +91,57 @@ type RecordSpec = {
   as_of?: string;
 };
 
-/** Seed on first run so the app is demo-ready with no setup step. */
-export function ensureSeeded() {
-  if (!isSeeded()) seed();
+let seedGate: Promise<void> | null = null;
+
+/**
+ * Seeds on first run so the app is demo-ready with no setup step.
+ *
+ * Memoized at module scope, not just re-checked per call: Next.js fetches
+ * data for a layout and its page in parallel, not sequentially, so without a
+ * shared in-flight promise a page's first query can race the layout's seed
+ * and read the tables before the seed transaction commits.
+ */
+export function ensureSeeded(): Promise<void> {
+  if (!seedGate) {
+    seedGate = (async () => {
+      if (!(await isSeeded())) await seed();
+    })();
+  }
+  return seedGate;
 }
 
-export function seed() {
-  const conn = db();
-
-  const tx = conn.transaction(() => {
+export async function seed() {
+  await transaction(async (tx) => {
     // ---- Departments -----------------------------------------------------
-    const dept = conn.prepare(`INSERT INTO department (id, name, business_unit) VALUES (?,?,?)`);
-    dept.run(1, 'Sales', 'Consumer Division');
-    dept.run(2, 'Production', 'Industrial Division');
-    dept.run(3, 'Quality Control', 'Industrial Division');
-    dept.run(4, 'Supply Chain', 'Industrial Division');
+    const dept = (id: number, name: string, business_unit: string) =>
+      tx.run(`INSERT INTO department (id, name, business_unit) VALUES (?,?,?)`, [id, name, business_unit]);
+    await dept(1, 'Sales', 'Consumer Division');
+    await dept(2, 'Production', 'Industrial Division');
+    await dept(3, 'Quality Control', 'Industrial Division');
+    await dept(4, 'Supply Chain', 'Industrial Division');
 
-    // ---- People ----------------------------------------------------------
-    const emp = conn.prepare(
-      `INSERT INTO employee (id, name, title, dept_id, manager_id, role) VALUES (?,?,?,?,?,?)`,
-    );
-    emp.run(5, 'Kamrul Islam', 'Sales Manager', 1, null, 'manager');
-    emp.run(6, 'Farhana Chowdhury', 'Operations Manager', 2, null, 'manager');
-    emp.run(7, 'Mahbub Rahman', 'Head of Business Unit', 1, null, 'approver');
-    emp.run(8, 'Ayesha Siddiqua', 'HR Business Partner', 1, null, 'hr');
-    emp.run(1, 'Rafiq Ahmed', 'Senior Sales Executive', 1, 5, 'employee');
-    emp.run(2, 'Nasrin Sultana', 'Production Supervisor', 2, 6, 'employee');
-    emp.run(3, 'Tanvir Hossain', 'QC Officer', 3, 6, 'employee');
-    emp.run(4, 'Shirin Akter', 'Supply Chain Officer', 4, 6, 'employee');
+    // ---- People ------------------------------------------------------------
+    const emp = (id: number, name: string, title: string, dept_id: number, manager_id: number | null, role: string) =>
+      tx.run(`INSERT INTO employee (id, name, title, dept_id, manager_id, role) VALUES (?,?,?,?,?,?)`, [
+        id, name, title, dept_id, manager_id, role,
+      ]);
+    await emp(5, 'Kamrul Islam', 'Sales Manager', 1, null, 'manager');
+    await emp(6, 'Farhana Chowdhury', 'Operations Manager', 2, null, 'manager');
+    await emp(7, 'Mahbub Rahman', 'Head of Business Unit', 1, null, 'approver');
+    await emp(8, 'Ayesha Siddiqua', 'HR Business Partner', 1, null, 'hr');
+    await emp(1, 'Rafiq Ahmed', 'Senior Sales Executive', 1, 5, 'employee');
+    await emp(2, 'Nasrin Sultana', 'Production Supervisor', 2, 6, 'employee');
+    await emp(3, 'Tanvir Hossain', 'QC Officer', 3, 6, 'employee');
+    await emp(4, 'Shirin Akter', 'Supply Chain Officer', 4, 6, 'employee');
 
-    // ---- Periods ---------------------------------------------------------
-    const per = conn.prepare(
-      `INSERT INTO period (id, label, type, start_date, end_date, status) VALUES (?,?,?,?,?,?)`,
-    );
-    per.run(1, 'June 2026', 'month', '2026-06-01', '2026-06-30', 'closed');
-    per.run(2, 'July 2026', 'month', '2026-07-01', '2026-07-31', 'closed');
-    per.run(3, 'August 2026', 'month', '2026-08-01', '2026-08-31', 'open');
+    // ---- Periods -------------------------------------------------------------
+    const per = (id: number, label: string, type: string, start: string, end: string, status: string) =>
+      tx.run(`INSERT INTO period (id, label, type, start_date, end_date, status) VALUES (?,?,?,?,?,?)`, [
+        id, label, type, start, end, status,
+      ]);
+    await per(1, 'June 2026', 'month', '2026-06-01', '2026-06-30', 'closed');
+    await per(2, 'July 2026', 'month', '2026-07-01', '2026-07-31', 'closed');
+    await per(3, 'August 2026', 'month', '2026-08-01', '2026-08-31', 'open');
 
     // ---- Closed periods: enough history for trends and recurring gaps -----
     // Nasrin's downtime is below target in all three periods on purpose — it is
@@ -135,37 +150,37 @@ export function seed() {
       [1, 9_600_000, 4, 48_200, 24, 1.4, 93],
       [2, 8_800_000, 6, 46_900, 25, 1.1, 92],
     ] as const) {
-      full({
+      await full(tx, {
         employee_id: 1, period_id: pid, name: 'Monthly Sales', type: 'standard',
         target: 10_000_000, unit: 'BDT', weight: 60, reviewer_id: 5, approver_id: 7,
         actual: sales, source: 'system', source_detail: 'Sales System export',
         state: 'approved',
       });
-      full({
+      await full(tx, {
         employee_id: 1, period_id: pid, name: 'Customer Complaints', type: 'inverse',
         target: 5, unit: 'complaints', weight: 40, reviewer_id: 5, approver_id: 7,
         actual: complaints, source: 'system', source_detail: 'CRM export',
         state: 'approved',
       });
-      full({
+      await full(tx, {
         employee_id: 2, period_id: pid, name: 'Production Output', type: 'standard',
         target: 50_000, unit: 'units', weight: 60, reviewer_id: 6, approver_id: 7,
         actual: output, source: 'system', source_detail: 'MES export',
         state: 'approved',
       });
-      full({
+      await full(tx, {
         employee_id: 2, period_id: pid, name: 'Downtime Hours', type: 'inverse',
         target: 20, unit: 'hours', weight: 40, reviewer_id: 6, approver_id: 7,
         actual: downtime, source: 'system', source_detail: 'MES export',
         state: 'approved',
       });
-      full({
+      await full(tx, {
         employee_id: 3, period_id: pid, name: 'Defect Rate', type: 'inverse',
         target: 2, unit: '%', weight: 100, reviewer_id: 6, approver_id: 7,
         actual: defect, source: 'system', source_detail: 'QC system export',
         state: 'approved',
       });
-      full({
+      await full(tx, {
         employee_id: 4, period_id: pid, name: 'On-time Delivery', type: 'standard',
         target: 95, unit: '%', weight: 100, reviewer_id: 6, approver_id: 7,
         actual: otd, source: 'system', source_detail: 'Logistics export',
@@ -178,13 +193,13 @@ export function seed() {
     // Rafiq — the demo walkthrough employee. Monthly Sales is the PDF's own
     // example row and is left in `draft` so the demo can walk the full flow:
     // enter actual -> attach evidence -> score -> review -> approve -> dashboard.
-    full({
+    await full(tx, {
       employee_id: 1, period_id: 3, name: 'Monthly Sales',
       description: 'Net invoiced sales for the Consumer Division territory.',
       type: 'standard', target: 10_000_000, unit: 'BDT', weight: 30,
       reviewer_id: 5, approver_id: 7, state: 'draft',
     });
-    full({
+    await full(tx, {
       employee_id: 1, period_id: 3, name: 'Customer Complaints',
       description: 'Complaints logged against this territory. Lower is better.',
       type: 'inverse', target: 5, unit: 'complaints', weight: 20,
@@ -192,7 +207,7 @@ export function seed() {
       actual: 3, source: 'system', source_detail: 'CRM export, 01 Sep 2026',
       state: 'submitted',
     });
-    full({
+    await full(tx, {
       employee_id: 1, period_id: 3, name: 'New Dealer Onboarding',
       description: 'Onboard four new dealers on the agreed schedule.',
       type: 'milestone', weight: 25, reviewer_id: 5, approver_id: 7,
@@ -207,7 +222,7 @@ export function seed() {
       evidence: [{ filename: 'dealer-onboarding-tracker.txt', body: DEALER_TRACKER }],
       as_of: '2026-08-31',
     });
-    full({
+    await full(tx, {
       employee_id: 1, period_id: 3, name: 'Client Communication',
       description: 'Quality and timeliness of client communication.',
       type: 'qualitative', weight: 25, reviewer_id: 5, approver_id: 7,
@@ -218,13 +233,13 @@ export function seed() {
     });
 
     // Nasrin — Production. Downtime is below target for the third period running.
-    full({
+    await full(tx, {
       employee_id: 2, period_id: 3, name: 'Production Output', type: 'standard',
       target: 50_000, unit: 'units', weight: 40, reviewer_id: 6, approver_id: 7,
       actual: 47_500, source: 'system', source_detail: 'MES export, 01 Sep 2026',
       state: 'approved',
     });
-    full({
+    await full(tx, {
       employee_id: 2, period_id: 3, name: 'Downtime Hours',
       description: 'Unplanned and planned line downtime. Lower is better.',
       type: 'inverse', target: 20, unit: 'hours', weight: 30,
@@ -233,7 +248,7 @@ export function seed() {
       comment: 'Motor bearing failure on 09 Aug accounted for 9.5 hours.',
       evidence: [{ filename: 'downtime-log-august.txt', body: DOWNTIME_LOG }],
     });
-    full({
+    await full(tx, {
       employee_id: 2, period_id: 3, name: 'Line Safety Compliance', type: 'qualitative',
       weight: 30, reviewer_id: 6, approver_id: 7, rubric: RUBRIC,
       rubric_level: 4, source: 'manual', state: 'approved',
@@ -243,39 +258,39 @@ export function seed() {
 
     // Tanvir — QC. Defect Rate at zero is the case that breaks target/actual:
     // it is a perfect result and would divide by zero under the naive formula.
-    full({
+    await full(tx, {
       employee_id: 3, period_id: 3, name: 'Defect Rate',
       description: 'Rejected units as a share of output. Lower is better.',
       type: 'inverse', target: 2, unit: '%', weight: 50, reviewer_id: 6, approver_id: 7,
       actual: 0, source: 'system', source_detail: 'QC system export, 01 Sep 2026',
       state: 'approved',
     });
-    full({
+    await full(tx, {
       employee_id: 3, period_id: 3, name: 'Inspection Coverage', type: 'standard',
       target: 100, unit: '%', weight: 30, reviewer_id: 6, approver_id: 7,
       actual: 96, source: 'system', source_detail: 'QC system export',
       state: 'under_review',
     });
     // Left pending on purpose: pending is not zero, and the dashboard must show it.
-    full({
+    await full(tx, {
       employee_id: 3, period_id: 3, name: 'QC Documentation Quality', type: 'qualitative',
       weight: 20, reviewer_id: 6, approver_id: 7, rubric: RUBRIC, state: 'draft',
     });
 
     // Shirin — Supply Chain.
-    full({
+    await full(tx, {
       employee_id: 4, period_id: 3, name: 'On-time Delivery', type: 'standard',
       target: 95, unit: '%', weight: 35, reviewer_id: 6, approver_id: 7,
       actual: 91, source: 'system', source_detail: 'Logistics export',
       state: 'submitted',
     });
-    full({
+    await full(tx, {
       employee_id: 4, period_id: 3, name: 'Inventory Accuracy', type: 'standard',
       target: 98, unit: '%', weight: 25, reviewer_id: 6, approver_id: 7,
       actual: 98, source: 'system', source_detail: 'WMS cycle count',
       state: 'approved',
     });
-    full({
+    await full(tx, {
       employee_id: 4, period_id: 3, name: 'Vendor Consolidation Project',
       type: 'milestone', weight: 40, reviewer_id: 6, approver_id: 7,
       milestones: [
@@ -291,63 +306,56 @@ export function seed() {
     });
 
     // Sample evidence files the demo can attach without needing a real upload.
-    conn.prepare(
-      `CREATE TABLE IF NOT EXISTS sample_evidence (
-         id INTEGER PRIMARY KEY, filename TEXT NOT NULL, label TEXT NOT NULL, body TEXT NOT NULL)`,
-    ).run();
-    const sample = conn.prepare(
-      `INSERT INTO sample_evidence (filename, label, body) VALUES (?,?,?)`,
-    );
-    sample.run(
-      'august-sales-report.txt',
-      'August Sales Report (as circulated 01 Sep)',
-      SALES_REPORT_MISMATCH,
-    );
-    sample.run(
-      'august-sales-report-final.txt',
-      'August Sales Report — FINAL (reconciled)',
-      SALES_REPORT_MATCH,
-    );
+    const sample = (filename: string, label: string, body: string) =>
+      tx.run(`INSERT INTO sample_evidence (filename, label, body) VALUES (?,?,?)`, [filename, label, body]);
+    await sample('august-sales-report.txt', 'August Sales Report (as circulated 01 Sep)', SALES_REPORT_MISMATCH);
+    await sample('august-sales-report-final.txt', 'August Sales Report — FINAL (reconciled)', SALES_REPORT_MATCH);
   });
+}
 
-  tx();
+/** Wipe the database and evidence bucket, then reseed. Used before recording a walkthrough. */
+export async function resetDemo() {
+  await resetAll();
+  await clearEvidenceBucket();
+  await seed();
 }
 
 /** Create an assignment plus, where applicable, its actual, evidence, score and audit events. */
-function full(spec: RecordSpec) {
-  const conn = db();
+async function full(tx: Tx, spec: RecordSpec): Promise<number> {
   const ts = now();
 
-  const assignment = conn
-    .prepare(
-      `INSERT INTO kpi_assignment
-       (employee_id, period_id, name, description, type, target, unit, weight,
-        reviewer_id, approver_id, state, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
-    )
-    .run(
+  const kpiId = await tx.insertReturningId(
+    `INSERT INTO kpi_assignment
+     (employee_id, period_id, name, description, type, target, unit, weight,
+      reviewer_id, approver_id, state, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    [
       spec.employee_id, spec.period_id, spec.name, spec.description ?? null, spec.type,
       spec.target ?? null, spec.unit ?? null, spec.weight,
       spec.reviewer_id, spec.approver_id, spec.state, ts,
-    );
-  const kpiId = Number(assignment.lastInsertRowid);
+    ],
+  );
 
-  event(kpiId, spec.reviewer_id, 'assign', null, ts);
+  await event(kpiId, spec.reviewer_id, 'assign', null, ts, null, null, tx);
 
   if (spec.rubric) {
-    const ins = conn.prepare(
-      `INSERT INTO rubric_level (kpi_assignment_id, level, label, criteria_text, achievement_pct)
-       VALUES (?,?,?,?,?)`,
-    );
-    for (const r of spec.rubric) ins.run(kpiId, r.level, r.label, r.criteria, r.pct);
+    for (const r of spec.rubric) {
+      await tx.run(
+        `INSERT INTO rubric_level (kpi_assignment_id, level, label, criteria_text, achievement_pct)
+         VALUES (?,?,?,?,?)`,
+        [kpiId, r.level, r.label, r.criteria, r.pct],
+      );
+    }
   }
 
   if (spec.milestones) {
-    const ins = conn.prepare(
-      `INSERT INTO milestone (kpi_assignment_id, title, sub_weight, due_date, completed_date)
-       VALUES (?,?,?,?,?)`,
-    );
-    for (const m of spec.milestones) ins.run(kpiId, m.title, m.sub_weight, m.due_date, m.completed_date);
+    for (const m of spec.milestones) {
+      await tx.run(
+        `INSERT INTO milestone (kpi_assignment_id, title, sub_weight, due_date, completed_date)
+         VALUES (?,?,?,?,?)`,
+        [kpiId, m.title, m.sub_weight, m.due_date, m.completed_date],
+      );
+    }
   }
 
   if (spec.state === 'draft') return kpiId;
@@ -357,30 +365,27 @@ function full(spec: RecordSpec) {
     ? (spec.rubric ?? RUBRIC).find((r) => r.level === spec.rubric_level)?.pct ?? null
     : null;
 
-  const entry = conn
-    .prepare(
-      `INSERT INTO actual_entry
-       (kpi_assignment_id, value, rubric_level, source, source_detail, comment, reported_by, reported_at)
-       VALUES (?,?,?,?,?,?,?,?)`,
-    )
-    .run(
+  const entryId = await tx.insertReturningId(
+    `INSERT INTO actual_entry
+     (kpi_assignment_id, value, rubric_level, source, source_detail, comment, reported_by, reported_at)
+     VALUES (?,?,?,?,?,?,?,?)`,
+    [
       kpiId, spec.actual ?? null, spec.rubric_level ?? null,
       spec.source ?? 'system', spec.source_detail ?? null, spec.comment ?? null,
       spec.employee_id, ts,
-    );
-  const entryId = Number(entry.lastInsertRowid);
+    ],
+  );
 
   for (const ev of spec.evidence ?? []) {
-    const ref = storeEvidenceFile(ev.filename, ev.body);
-    conn
-      .prepare(
-        `INSERT INTO evidence (actual_entry_id, filename, file_ref, mime, uploaded_by, uploaded_at)
-         VALUES (?,?,?,?,?,?)`,
-      )
-      .run(entryId, ev.filename, ref, 'text/plain', spec.employee_id, ts);
+    const ref = await storeEvidenceFile(ev.filename, ev.body);
+    await tx.run(
+      `INSERT INTO evidence (actual_entry_id, filename, file_ref, mime, uploaded_by, uploaded_at)
+       VALUES (?,?,?,?,?,?)`,
+      [entryId, ev.filename, ref, 'text/plain', spec.employee_id, ts],
+    );
   }
 
-  event(kpiId, spec.employee_id, 'submit', null, ts);
+  await event(kpiId, spec.employee_id, 'submit', null, ts, null, null, tx);
 
   // ---- score -------------------------------------------------------------
   const result = computeAchievement({
@@ -392,43 +397,41 @@ function full(spec: RecordSpec) {
     as_of: spec.as_of,
   });
 
-  const scoreId = writeScore(kpiId, result, {
+  const scoreId = await writeScore(kpiId, result, {
     type: spec.type, target: spec.target, actual: spec.actual,
     rubric_level: spec.rubric_level, milestones: spec.milestones,
-  }, spec.employee_id);
+  }, spec.employee_id, undefined, tx);
 
   if (spec.state === 'under_review') {
-    event(kpiId, spec.reviewer_id, 'review', null, ts);
+    await event(kpiId, spec.reviewer_id, 'review', null, ts, null, null, tx);
   }
 
   if (spec.state === 'approved') {
-    event(kpiId, spec.reviewer_id, 'review', null, ts);
-    event(kpiId, spec.approver_id, 'approve', null, ts, null, scoreId);
-    conn
-      .prepare(`UPDATE kpi_assignment SET state='approved', locked_by=?, locked_at=? WHERE id=?`)
-      .run(spec.approver_id, ts, kpiId);
+    await event(kpiId, spec.reviewer_id, 'review', null, ts, null, null, tx);
+    await event(kpiId, spec.approver_id, 'approve', null, ts, null, scoreId, tx);
+    await tx.run(`UPDATE kpi_assignment SET state='approved', locked_by=?, locked_at=? WHERE id=?`, [
+      spec.approver_id, ts, kpiId,
+    ]);
   }
 
   return kpiId;
 }
 
-export function writeScore(
+export async function writeScore(
   kpiId: number,
   result: ReturnType<typeof computeAchievement>,
   inputs: unknown,
   actorId: number,
   opts?: { final_pct?: number; adjusted?: boolean; reason?: string },
-): number {
-  const conn = db();
-  conn.prepare(`UPDATE score SET is_current=0 WHERE kpi_assignment_id=?`).run(kpiId);
-  const row = conn
-    .prepare(
-      `INSERT INTO score
-       (kpi_assignment_id, calculated_pct, final_pct, formula_version, formula,
-        inputs_json, cap_applied, adjusted, reason, is_current, created_by, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,1,?,?)`,
-    )
-    .run(
+  tx: Tx = { all, one, run, insertReturningId },
+): Promise<number> {
+  await tx.run(`UPDATE score SET is_current=0 WHERE kpi_assignment_id=?`, [kpiId]);
+  return tx.insertReturningId(
+    `INSERT INTO score
+     (kpi_assignment_id, calculated_pct, final_pct, formula_version, formula,
+      inputs_json, cap_applied, adjusted, reason, is_current, created_by, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,1,?,?)`,
+    [
       kpiId,
       result.achievement_pct,
       opts?.final_pct ?? result.achievement_pct,
@@ -440,11 +443,11 @@ export function writeScore(
       opts?.reason ?? null,
       actorId,
       now(),
-    );
-  return Number(row.lastInsertRowid);
+    ],
+  );
 }
 
-export function event(
+export async function event(
   kpiId: number,
   actorId: number,
   action: string,
@@ -452,13 +455,13 @@ export function event(
   at = now(),
   prevScoreId: number | null = null,
   newScoreId: number | null = null,
-) {
-  db()
-    .prepare(
-      `INSERT INTO review_event (kpi_assignment_id, actor_id, action, reason, prev_score_id, new_score_id, at)
-       VALUES (?,?,?,?,?,?,?)`,
-    )
-    .run(kpiId, actorId, action, reason, prevScoreId, newScoreId, at);
+  tx: Tx = { all, one, run, insertReturningId },
+): Promise<void> {
+  await tx.run(
+    `INSERT INTO review_event (kpi_assignment_id, actor_id, action, reason, prev_score_id, new_score_id, at)
+     VALUES (?,?,?,?,?,?,?)`,
+    [kpiId, actorId, action, reason, prevScoreId, newScoreId, at],
+  );
 }
 
 const RUBRIC = [

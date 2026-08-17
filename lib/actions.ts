@@ -1,14 +1,12 @@
 'use server';
 
-import fs from 'node:fs';
-import path from 'node:path';
 import { revalidatePath } from 'next/cache';
 import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
-import { db, now, EVIDENCE_DIR, DATA_DIR, closeDb } from './db';
+import { all, insertReturningId, now, one, run } from './db';
 import { currentUser, CAN } from './session';
 import { computeAchievement, validateWeights, type KpiType } from './scoring';
-import { writeScore, event, seed } from './seed';
+import { writeScore, event, resetDemo as resetDemoData } from './seed';
 import { verifyEvidence } from './ai';
 import { storeEvidenceFile } from './evidence';
 import { getRecord } from './queries';
@@ -38,8 +36,8 @@ export async function switchUser(formData: FormData) {
 }
 
 /** Recompute from stored inputs and write a NEW score row. Never updates in place. */
-function recalculate(kpiId: number, actorId: number) {
-  const rec = getRecord(kpiId);
+async function recalculate(kpiId: number, actorId: number) {
+  const rec = await getRecord(kpiId);
   if (!rec) return null;
 
   const rubricPct = rec.rubric_level
@@ -73,7 +71,7 @@ function recalculate(kpiId: number, actorId: number) {
 export async function submitActual(formData: FormData) {
   const user = await currentUser();
   const kpiId = Number(formData.get('kpi_id'));
-  const rec = getRecord(kpiId);
+  const rec = await getRecord(kpiId);
   if (!rec) fail('/my-kpis', 'That KPI could not be found.');
 
   const back = `/kpi/${kpiId}/submit`;
@@ -82,7 +80,6 @@ export async function submitActual(formData: FormData) {
   if (user.role === 'manager' && user.id !== rec.reviewer.id) fail(back, 'You are not the manager routed to this KPI.');
   if (rec.state === 'approved') fail(back, 'This record is locked. Approved scores are changed only through the HR correction process.');
 
-  const conn = db();
   const source = (String(formData.get('source') ?? 'manual') === 'system' ? 'system' : 'manual') as
     | 'system'
     | 'manual';
@@ -99,14 +96,11 @@ export async function submitActual(formData: FormData) {
     // Milestone completion is captured on the milestone rows themselves.
     // Rows are read in the same order the form renders them, so the inputs are
     // addressed by position rather than by database id.
-    const ids = conn
-      .prepare(`SELECT id FROM milestone WHERE kpi_assignment_id = ? ORDER BY due_date`)
-      .all(kpiId) as { id: number }[];
-    const upd = conn.prepare(`UPDATE milestone SET completed_date = ? WHERE id = ?`);
-    ids.forEach((m, i) => {
+    const ids = await all<{ id: number }>(`SELECT id FROM milestone WHERE kpi_assignment_id = ? ORDER BY due_date`, [kpiId]);
+    for (let i = 0; i < ids.length; i++) {
       const d = String(formData.get(`ms_${i + 1}`) ?? '').trim();
-      upd.run(d || null, m.id);
-    });
+      await run(`UPDATE milestone SET completed_date = ? WHERE id = ?`, [d || null, ids[i].id]);
+    }
   } else {
     const raw = String(formData.get('value') ?? '').trim();
     if (raw === '') fail(back, 'Enter the actual result before submitting.');
@@ -125,43 +119,39 @@ export async function submitActual(formData: FormData) {
     fail(back, 'Manual entries require supporting evidence. Attach a document before submitting — this is a hard rule, not a reminder.');
   }
 
-  const entryId = Number(
-    conn
-      .prepare(
-        `INSERT INTO actual_entry
-         (kpi_assignment_id, value, rubric_level, source, source_detail, comment, reported_by, reported_at)
-         VALUES (?,?,?,?,?,?,?,?)`,
-      )
-      .run(
-        kpiId, value, rubricLevel, source,
-        source === 'system' ? String(formData.get('source_detail') ?? 'System export') : null,
-        comment, user.id, now(),
-      ).lastInsertRowid,
-  );
-
-  const insEvidence = conn.prepare(
-    `INSERT INTO evidence (actual_entry_id, filename, file_ref, mime, uploaded_by, uploaded_at)
-     VALUES (?,?,?,?,?,?)`,
+  const entryId = await insertReturningId(
+    `INSERT INTO actual_entry
+     (kpi_assignment_id, value, rubric_level, source, source_detail, comment, reported_by, reported_at)
+     VALUES (?,?,?,?,?,?,?,?)`,
+    [
+      kpiId, value, rubricLevel, source,
+      source === 'system' ? String(formData.get('source_detail') ?? 'System export') : null,
+      comment, user.id, now(),
+    ],
   );
 
   for (const file of uploads) {
     // file.name is attacker controlled — storeEvidenceFile sanitises it.
-    const ref = storeEvidenceFile(file.name, Buffer.from(await file.arrayBuffer()));
-    insEvidence.run(entryId, file.name, ref, file.type || 'application/octet-stream', user.id, now());
+    const ref = await storeEvidenceFile(file.name, Buffer.from(await file.arrayBuffer()));
+    await run(
+      `INSERT INTO evidence (actual_entry_id, filename, file_ref, mime, uploaded_by, uploaded_at) VALUES (?,?,?,?,?,?)`,
+      [entryId, file.name, ref, file.type || 'application/octet-stream', user.id, now()],
+    );
   }
 
   for (const sid of sampleIds) {
-    const s = conn.prepare(`SELECT filename, body FROM sample_evidence WHERE id = ?`).get(sid) as
-      | { filename: string; body: string }
-      | undefined;
+    const s = await one<{ filename: string; body: string }>(`SELECT filename, body FROM sample_evidence WHERE id = ?`, [sid]);
     if (!s) continue;
-    const ref = storeEvidenceFile(s.filename, s.body);
-    insEvidence.run(entryId, s.filename, ref, 'text/plain', user.id, now());
+    const ref = await storeEvidenceFile(s.filename, s.body);
+    await run(
+      `INSERT INTO evidence (actual_entry_id, filename, file_ref, mime, uploaded_by, uploaded_at) VALUES (?,?,?,?,?,?)`,
+      [entryId, s.filename, ref, 'text/plain', user.id, now()],
+    );
   }
 
-  event(kpiId, user.id, 'submit', comment, now());
-  recalculate(kpiId, user.id); // step 4: score calculated
-  conn.prepare(`UPDATE kpi_assignment SET state='submitted' WHERE id=?`).run(kpiId);
+  await event(kpiId, user.id, 'submit', comment, now());
+  await recalculate(kpiId, user.id); // step 4: score calculated
+  await run(`UPDATE kpi_assignment SET state='submitted' WHERE id=?`, [kpiId]);
 
   await verifyEvidence(kpiId); // AI writes to ai_suggestion only
 
@@ -174,14 +164,14 @@ export async function startReview(formData: FormData) {
   const kpiId = Number(formData.get('kpi_id'));
   if (!CAN.review(user)) fail(`/kpi/${kpiId}`, 'Your role cannot review records.');
 
-  const rec = getRecord(kpiId);
+  const rec = await getRecord(kpiId);
   if (!rec) fail('/review', 'That KPI could not be found.');
   if (user.id !== rec.reviewer.id && user.id !== rec.approver.id) {
     fail(`/kpi/${kpiId}`, 'You are not the reviewer or approver routed to this record.');
   }
 
-  db().prepare(`UPDATE kpi_assignment SET state='under_review' WHERE id=? AND state='submitted'`).run(kpiId);
-  event(kpiId, user.id, 'review', null, now());
+  await run(`UPDATE kpi_assignment SET state='under_review' WHERE id=? AND state='submitted'`, [kpiId]);
+  await event(kpiId, user.id, 'review', null, now());
   revalidateAll();
   redirect(`/kpi/${kpiId}`);
 }
@@ -193,14 +183,14 @@ export async function returnForClarification(formData: FormData) {
   if (!CAN.review(user)) fail(`/kpi/${kpiId}`, 'Your role cannot review records.');
   if (!reason) fail(`/kpi/${kpiId}`, 'A written reason is required when returning a record for clarification.');
 
-  const rec = getRecord(kpiId);
+  const rec = await getRecord(kpiId);
   if (!rec) fail('/review', 'That KPI could not be found.');
   if (user.id !== rec.reviewer.id && user.id !== rec.approver.id) {
     fail(`/kpi/${kpiId}`, 'You are not the reviewer or approver routed to this record.');
   }
 
-  db().prepare(`UPDATE kpi_assignment SET state='returned' WHERE id=?`).run(kpiId);
-  event(kpiId, user.id, 'return', reason, now());
+  await run(`UPDATE kpi_assignment SET state='returned' WHERE id=?`, [kpiId]);
+  await event(kpiId, user.id, 'return', reason, now());
   revalidateAll();
   redirect(`/kpi/${kpiId}`);
 }
@@ -219,7 +209,7 @@ export async function adjustScore(formData: FormData) {
   if (!reason) fail(`/kpi/${kpiId}`, 'A written reason is required for every manual adjustment. This is what makes the audit trail worth having.');
   if (!Number.isFinite(pct)) fail(`/kpi/${kpiId}`, 'Enter the adjusted achievement %.');
 
-  const rec = getRecord(kpiId);
+  const rec = await getRecord(kpiId);
   if (!rec) fail('/review', 'That KPI could not be found.');
   if (user.id !== rec.reviewer.id && user.id !== rec.approver.id) {
     fail(`/kpi/${kpiId}`, 'You are not the reviewer or approver routed to this record.');
@@ -236,7 +226,7 @@ export async function adjustScore(formData: FormData) {
     milestones: rec.milestones, rubric_pct: rubricPct, as_of: rec.period.end_date,
   });
 
-  const newScoreId = writeScore(
+  const newScoreId = await writeScore(
     kpiId,
     recomputed,
     { type: rec.type, target: rec.target, actual: rec.actual, rubric_level: rec.rubric_level },
@@ -244,7 +234,7 @@ export async function adjustScore(formData: FormData) {
     { final_pct: pct, adjusted: true, reason },
   );
 
-  event(kpiId, user.id, 'adjust', reason, now(), prevScoreId, newScoreId);
+  await event(kpiId, user.id, 'adjust', reason, now(), prevScoreId, newScoreId);
   revalidateAll();
   redirect(`/kpi/${kpiId}`);
 }
@@ -255,15 +245,13 @@ export async function approve(formData: FormData) {
   const kpiId = Number(formData.get('kpi_id'));
   if (!CAN.approve(user)) fail(`/kpi/${kpiId}`, 'Only an approver can give final approval. Switch to Mahbub Rahman.');
 
-  const rec = getRecord(kpiId);
+  const rec = await getRecord(kpiId);
   if (!rec) fail('/approve', 'That KPI could not be found.');
   if (user.id !== rec.approver.id) fail(`/kpi/${kpiId}`, 'You are not the approver routed to this record.');
   if (rec.pending) fail(`/kpi/${kpiId}`, 'This KPI has no recorded result yet, so there is nothing to approve.');
 
-  db()
-    .prepare(`UPDATE kpi_assignment SET state='approved', locked_by=?, locked_at=? WHERE id=?`)
-    .run(user.id, now(), kpiId);
-  event(kpiId, user.id, 'approve', null, now(), null, rec.score?.id ?? null);
+  await run(`UPDATE kpi_assignment SET state='approved', locked_by=?, locked_at=? WHERE id=?`, [user.id, now(), kpiId]);
+  await event(kpiId, user.id, 'approve', null, now(), null, rec.score?.id ?? null);
   revalidateAll();
   redirect(`/kpi/${kpiId}`);
 }
@@ -282,7 +270,7 @@ export async function correct(formData: FormData) {
   if (!reason) fail(`/kpi/${kpiId}`, 'A written reason is required for a correction.');
   if (!Number.isFinite(pct)) fail(`/kpi/${kpiId}`, 'Enter the corrected achievement %.');
 
-  const rec = getRecord(kpiId);
+  const rec = await getRecord(kpiId);
   if (!rec) fail('/dashboard', 'That KPI could not be found.');
   if (rec.state !== 'approved' && rec.state !== 'corrected') {
     fail(`/kpi/${kpiId}`, 'Corrections apply only to approved records.');
@@ -297,17 +285,15 @@ export async function correct(formData: FormData) {
     milestones: rec.milestones, rubric_pct: rubricPct, as_of: rec.period.end_date,
   });
 
-  const newScoreId = writeScore(
+  const newScoreId = await writeScore(
     kpiId, recomputed,
     { type: rec.type, target: rec.target, actual: rec.actual, rubric_level: rec.rubric_level },
     user.id,
     { final_pct: pct, adjusted: true, reason: `CORRECTION: ${reason}` },
   );
 
-  db()
-    .prepare(`UPDATE kpi_assignment SET state='corrected', locked_by=?, locked_at=? WHERE id=?`)
-    .run(user.id, now(), kpiId);
-  event(kpiId, user.id, 'correct', reason, now(), prevScoreId, newScoreId);
+  await run(`UPDATE kpi_assignment SET state='corrected', locked_by=?, locked_at=? WHERE id=?`, [user.id, now(), kpiId]);
+  await event(kpiId, user.id, 'correct', reason, now(), prevScoreId, newScoreId);
   revalidateAll();
   redirect(`/kpi/${kpiId}`);
 }
@@ -319,10 +305,10 @@ export async function resolveSuggestion(formData: FormData) {
   const suggestionId = Number(formData.get('suggestion_id'));
   const resolution = String(formData.get('resolution')) === 'accepted' ? 'accepted' : 'overridden';
 
-  db()
-    .prepare(`UPDATE ai_suggestion SET resolution=?, resolved_by=?, resolved_at=? WHERE id=?`)
-    .run(resolution, user.id, now(), suggestionId);
-  event(
+  await run(`UPDATE ai_suggestion SET resolution=?, resolved_by=?, resolved_at=? WHERE id=?`, [
+    resolution, user.id, now(), suggestionId,
+  ]);
+  await event(
     kpiId, user.id, resolution === 'accepted' ? 'ai_accept' : 'ai_override',
     resolution === 'accepted'
       ? 'Reviewer accepted the evidence-check finding'
@@ -337,7 +323,6 @@ export async function createKpi(formData: FormData) {
   const user = await currentUser();
   if (!CAN.setupKpi(user)) fail('/setup', 'Your role cannot set up KPIs.');
 
-  const conn = db();
   const employee_id = Number(formData.get('employee_id'));
   const period_id = Number(formData.get('period_id'));
   const type = String(formData.get('type')) as KpiType;
@@ -354,35 +339,28 @@ export async function createKpi(formData: FormData) {
     );
   }
 
-  const existing = conn
-    .prepare(`SELECT weight FROM kpi_assignment WHERE employee_id=? AND period_id=?`)
-    .all(employee_id, period_id) as { weight: number }[];
+  const existing = await all<{ weight: number }>(`SELECT weight FROM kpi_assignment WHERE employee_id=? AND period_id=?`, [
+    employee_id, period_id,
+  ]);
   const check = validateWeights([...existing.map((e) => e.weight), weight]);
   if (check.total > 100) {
     fail('/setup', `Weights for this employee would total ${check.total}%. They must not exceed 100%.`);
   }
 
-  const kpiId = Number(
-    conn
-      .prepare(
-        `INSERT INTO kpi_assignment
-         (employee_id, period_id, name, description, type, target, unit, weight,
-          reviewer_id, approver_id, state, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?, 'draft', ?)`,
-      )
-      .run(
-        employee_id, period_id, name,
-        String(formData.get('description') ?? '').trim() || null,
-        type, target, String(formData.get('unit') ?? '').trim() || null, weight,
-        Number(formData.get('reviewer_id')), Number(formData.get('approver_id')), now(),
-      ).lastInsertRowid,
+  const kpiId = await insertReturningId(
+    `INSERT INTO kpi_assignment
+     (employee_id, period_id, name, description, type, target, unit, weight,
+      reviewer_id, approver_id, state, created_at)
+     VALUES (?,?,?,?,?,?,?,?,?,?, 'draft', ?)`,
+    [
+      employee_id, period_id, name,
+      String(formData.get('description') ?? '').trim() || null,
+      type, target, String(formData.get('unit') ?? '').trim() || null, weight,
+      Number(formData.get('reviewer_id')), Number(formData.get('approver_id')), now(),
+    ],
   );
 
   if (type === 'qualitative') {
-    const ins = conn.prepare(
-      `INSERT INTO rubric_level (kpi_assignment_id, level, label, criteria_text, achievement_pct)
-       VALUES (?,?,?,?,?)`,
-    );
     for (const r of [
       { level: 5, label: 'Outstanding', criteria: 'Consistently exceeds the standard; sets the example others follow.', pct: 100 },
       { level: 4, label: 'Strong', criteria: 'Meets the standard reliably and exceeds it in several instances.', pct: 85 },
@@ -390,37 +368,35 @@ export async function createKpi(formData: FormData) {
       { level: 2, label: 'Partially meets', criteria: 'Meets the standard inconsistently; needs follow-up.', pct: 50 },
       { level: 1, label: 'Below standard', criteria: 'Does not meet the agreed standard; improvement plan required.', pct: 25 },
     ]) {
-      ins.run(kpiId, r.level, r.label, r.criteria, r.pct);
+      await run(
+        `INSERT INTO rubric_level (kpi_assignment_id, level, label, criteria_text, achievement_pct) VALUES (?,?,?,?,?)`,
+        [kpiId, r.level, r.label, r.criteria, r.pct],
+      );
     }
   }
 
   if (type === 'milestone') {
-    const ins = conn.prepare(
-      `INSERT INTO milestone (kpi_assignment_id, title, sub_weight, due_date, completed_date)
-       VALUES (?,?,?,?,NULL)`,
-    );
     for (let i = 1; i <= 4; i++) {
       const t = String(formData.get(`ms_title_${i}`) ?? '').trim();
       const d = String(formData.get(`ms_due_${i}`) ?? '').trim();
       const w = Number(formData.get(`ms_weight_${i}`) ?? 1);
-      if (t && d) ins.run(kpiId, t, Number.isFinite(w) && w > 0 ? w : 1, d);
+      if (t && d) {
+        await run(
+          `INSERT INTO milestone (kpi_assignment_id, title, sub_weight, due_date, completed_date) VALUES (?,?,?,?,NULL)`,
+          [kpiId, t, Number.isFinite(w) && w > 0 ? w : 1, d],
+        );
+      }
     }
   }
 
-  event(kpiId, user.id, 'assign', null, now());
+  await event(kpiId, user.id, 'assign', null, now());
   revalidateAll();
   redirect(`/kpi/${kpiId}`);
 }
 
 /** Reset to the seeded demo state. Used before recording a walkthrough. */
 export async function resetDemo() {
-  closeDb();
-  try {
-    fs.rmSync(DATA_DIR, { recursive: true, force: true });
-  } catch {
-    /* ignore */
-  }
-  seed();
+  await resetDemoData();
   revalidateAll();
   redirect('/');
 }

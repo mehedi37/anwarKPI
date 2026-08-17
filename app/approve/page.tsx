@@ -15,7 +15,7 @@ export default async function ApprovePage() {
     );
   }
 
-  const queue = approvalQueue(user.id);
+  const queue = await approvalQueue(user.id);
 
   return (
     <>
