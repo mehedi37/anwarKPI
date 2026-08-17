@@ -1,8 +1,19 @@
-# Anwar KPIFlow — working prototype
-
+# Anwar KPIFlow
 A first version of a variable-KPI system where every score can be traced back to a target, an actual result, supporting evidence, and an accountable approval.
 
-Built for the Anwar Group technology-selection assignment. Demo data only — people and BDT figures are fictional.
+Built for the Anwar Group technology-selection assignment. Demo data only. People and BDT figures are fictional.
+
+---
+
+## Submission
+
+| | |
+|---|---|
+| **Live prototype** | [anwarkpi.onrender.com](https://anwarkpi.onrender.com/) — role switcher in the header, no login needed. Follow [the demo path](#the-demo-path) below. |
+| **Slide deck** | Problem understanding, UI/UX walkthrough and technical design — `deck/anwar-kpiflow-deck.pdf` |
+| **Demo video** | Short walkthrough of the main workflow — [Google Drive link](https://drive.google.com/file/d/1QupaP_S6ES-pHwzX8_m4kEWSMaN2BWjM/view?usp=sharing) |
+
+Render's free tier spins down when idle, so the first load after inactivity can take 30–60 seconds to wake up.
 
 ---
 
@@ -10,11 +21,14 @@ Built for the Anwar Group technology-selection assignment. Demo data only — pe
 
 ```bash
 npm install
+cp .env.example .env   # fill in DATABASE_URL, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 npm run build && npm start     # http://localhost:3000
 # or: npm run dev
 ```
 
-The database seeds itself on first request — there is no setup step. To exercise the AI evidence check, set a key before starting:
+State lives in Supabase, not on local disk, so `DATABASE_URL` (Postgres connection string), `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (for the private evidence bucket) are required — the app throws on startup without `DATABASE_URL`. Use the **Transaction pooler** connection string (port 6543), not the Session pooler (5432): dashboard and record pages fan out several queries concurrently, and Session mode holds a backend connection for a client's whole lifetime, which exhausts the free tier's small shared pool fast. The database schema and demo data seed themselves on first request once connected — there is no migration step.
+
+`ANTHROPIC_API_KEY` is optional and only needed to exercise the AI evidence check:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
@@ -163,6 +177,8 @@ Evidence documents are performance-review material, so they are treated as acces
 
 Every dashboard figure is computed on read from the same normalised tables — no summary store to drift out of sync — and every tile drills through to the records underneath it. At a few thousand records per period that is the right trade; a materialised layer can go behind the same queries later without touching the schema.
 
+Read paths are optimised for round trips, not just for query shape, since each one costs real latency over a pooled connection: `getRecord` (`lib/queries.ts`) assembles a record plus its period, latest entry, rubric, milestones, full score history, evidence and AI suggestion in **one query** via `LATERAL` joins and `json_agg`, rather than the ~7 sequential queries that would otherwise run once per row on every list and dashboard page. The employee summary page fetches each period's totals once and reuses them for the current, previous and trend-row views, instead of recomputing the same period repeatedly.
+
 ---
 
 ## The scoring engine
@@ -201,38 +217,4 @@ Governance is structural, not a promise:
 - Accepting or overriding a flag is itself a logged `review_event`.
 - With no API key the feature reports that it is unconfigured. It never fabricates a result, and nothing else in the system changes.
 
-Deliberately **not** built: anomaly detection (needs several periods of history to have signal — noise at launch), natural-language KPI setup and dashboard Q&A (convenience, not objectivity), and anything that scores, ranks or compares employees — excluded by the brief and against the design principle.
-
----
-
-## Visual direction
-
-**A score is a measurement, not an opinion** — and the interface argues that.
-
-- **The tolerance rail** is the signature. Every achievement figure is drawn on a track running 0 to the 120% cap, with a tick marking the target. The fill colour says which side of the datum the result landed on, the hard stop at the right edge shows the cap being applied, and an unmeasured KPI draws as a *hatched empty track* rather than a bar at zero — so "pending is not zero" is something you can see, not just something the README claims. It replaces every progress bar and stat-tile sparkline in the app.
-- **Colour is a deviation scale, not a traffic light.** Teal reads "at or above the datum", oxide "below it", ochre "not measured yet", indigo "locked or corrected". Green-for-good and red-for-bad would smuggle a judgement into what is meant to be an arithmetic result.
-- **Two typefaces with sharp roles.** Space Grotesk carries the interface; IBM Plex Mono carries every figure, so targets, actuals, percentages and BDT amounts all read as instrument values. Both are self-hosted at build time by `next/font` — no runtime CDN request.
-- **The ground is drafting paper** — a two-level grid at very low contrast — and cards are square-cornered measurement sheets on top of it.
-- **The overview leads with a finished measurement**, not a welcome: one real record with the actual value satisfying each link in its chain.
-
-Quality floor: responsive to 390px, visible keyboard focus, `prefers-reduced-motion` respected.
-
-## What this is not
-
-The brief says this is not a full HRMS, so:
-
-- No payroll, attendance, recruitment or learning management
-- No employee, department or org-chart administration — people are seeded
-- No authentication — roles switch from the header
-- No notifications, no mobile app, no configurable multi-level approval routing
-- No live ERP integration — `source = 'system'` entries are seeded to show the provenance model; one scheduled CSV import would replace them without changing anything else
-
-Everything on that list can be added without changing the data model, which is the actual claim being made about the design.
-
-## Known limitations
-
-- Runs on Postgres (Supabase) and Supabase Storage, so it already tolerates multiple instances and restarts; the remaining single-instance assumption is `lib/actions.ts`'s in-process revalidation, not the data layer.
-- The AI evidence check has been written against the documented API and its unconfigured path is verified, but the live call was not exercised in the build environment (no API key available there).
-- Milestone completion is captured on the submission form by position, which is fine for a fixed milestone list and would need stable ids if milestones became editable after assignment.
-- Evidence retrieval is authorised (see above), but **record pages themselves are not scoped** — any signed-in role can open `/kpi/[id]` for any record. That is deliberate for a demo where you switch personas to walk the flow, and it is the first thing to close in a real deployment: the same routing check used for evidence applies directly to `getRecord`.
-- Identity comes from an unsigned `uid` cookie, because there is no authentication. Every permission check is real and enforced server-side, but the identity behind it is self-asserted — so treat the permission model as demonstrated, not as deployed.
+Deliberately **not** built: anomaly detection (needs several periods of history to have signal — noise at launch), natural-language KPI setup and dashboard Q&A (convenience, not objectivity), and anything that scores, ranks or compares employees excluded by the brief and against the design principle.
