@@ -9,7 +9,7 @@ services:
     autoDeploy: true
     envVars:
       - key: NODE_VERSION
-        value: 20.18.1
+        value: 24.19.0
       - key: ANTHROPIC_API_KEY
         sync: false
       # Postgres (Supabase project: anwar-kpiflow, ap-south-1). Use the
