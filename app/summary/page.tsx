@@ -14,20 +14,20 @@ export default async function SummaryPage({
   searchParams: Promise<{ employee?: string; period?: string }>;
 }) {
   const user = await currentUser();
-  const sp = await searchParams;
-  const all = await periods();
-  const staff = await employees();
+  const [sp, all, staff] = await Promise.all([searchParams, periods(), employees()]);
 
   const employeeId =
     user.role === 'employee' ? user.id : Number(sp.employee ?? staff[0]?.id ?? user.id);
   const period = all.find((p) => String(p.id) === sp.period) ?? (await currentPeriod());
   const prev = all.filter((p) => p.id < period.id).at(-1) ?? null;
 
-  const { records, total } = await employeeTotal(employeeId, period.id);
-  const prevTotal = prev ? (await employeeTotal(employeeId, prev.id)).total : null;
+  // One employeeTotal() call per period, not one per (period, prev, trend-row)
+  // use site — each call fans out to that period's full KPI records.
   const totalsByPeriod = new Map(
-    await Promise.all(all.map(async (p) => [p.id, (await employeeTotal(employeeId, p.id)).total] as const)),
+    await Promise.all(all.map(async (p) => [p.id, await employeeTotal(employeeId, p.id)] as const)),
   );
+  const { records, total } = totalsByPeriod.get(period.id)!;
+  const prevTotal = prev ? totalsByPeriod.get(prev.id)!.total : null;
 
   const current = pctOf(total.score, total.scored_weight);
   const previous = prevTotal ? pctOf(prevTotal.score, prevTotal.scored_weight) : null;
@@ -209,7 +209,7 @@ export default async function SummaryPage({
           <p className="mt-1 text-sm text-ink3">Weighted score, comparable because targets are frozen.</p>
           <ul className="mt-4 space-y-3">
             {all.map((p) => {
-              const t = totalsByPeriod.get(p.id)!;
+              const t = totalsByPeriod.get(p.id)!.total;
               const v = pctOf(t.score, t.scored_weight);
               return (
                 <li key={p.id}>

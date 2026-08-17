@@ -183,15 +183,3 @@ export type Suggestion = {
   resolution: 'accepted' | 'overridden' | null;
   resolved_by_name: string | null;
 };
-
-export async function latestSuggestion(kpiId: number): Promise<Suggestion | null> {
-  return (
-    (await one<Suggestion>(
-      `SELECT s.id, s.status, s.extracted_value, s.claimed_value, s.rationale,
-              s.model_id, s.created_at, s.resolution, e.name AS resolved_by_name
-       FROM ai_suggestion s LEFT JOIN employee e ON e.id = s.resolved_by
-       WHERE s.kpi_assignment_id = ? ORDER BY s.id DESC LIMIT 1`,
-      [kpiId],
-    )) ?? null
-  );
-}
