@@ -9,8 +9,8 @@ Built for the Anwar Group technology-selection assignment. Demo data only. Peopl
 
 | | |
 |---|---|
-| **Live prototype** | [anwarkpi.onrender.com](https://anwarkpi.onrender.com/) — role switcher in the header, no login needed. Follow [the demo path](#the-demo-path) below. |
-| **Slide deck** | Problem understanding, UI/UX walkthrough and technical design — `deck/anwar-kpiflow-deck.pdf` |
+| **Live prototype** | [anwarkpi.onrender.com](https://anwarkpi.onrender.com/) — role switcher in the header, no login needed.|
+| **Slide deck** | Problem understanding, UI/UX walkthrough and technical design |
 | **Demo video** | Short walkthrough of the main workflow — [Google Drive link](https://drive.google.com/file/d/1QupaP_S6ES-pHwzX8_m4kEWSMaN2BWjM/view?usp=sharing) |
 
 Render's free tier spins down when idle, so the first load after inactivity can take 30–60 seconds to wake up.
