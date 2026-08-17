@@ -11,9 +11,10 @@ function pool(): Pool {
   // concurrently (Promise.all in dashboard()/getRecord()), and session mode
   // holds a backend connection for a client's whole lifetime rather than
   // releasing it between queries — it exhausts the free tier's small shared
-  // pool fast. `max` is kept low since transaction-mode pooling means this
-  // app doesn't need many concurrent client-side connections to stay fast.
-  _pool = new Pool({ connectionString, max: 5 });
+  // pool fast. Transaction mode multiplexes many client-side connections over
+  // a few backend ones, so `max` here can be generous without risking that —
+  // it bounds concurrency on the client, not backend connections consumed.
+  _pool = new Pool({ connectionString, max: 20 });
   return _pool;
 }
 

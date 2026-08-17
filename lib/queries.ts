@@ -113,12 +113,34 @@ export async function getRecord(id: number): Promise<KpiRecord | null> {
   );
   if (!k) return null;
 
-  const period = (await one<Period>(`SELECT * FROM period WHERE id = ?`, [k.period_id]))!;
-
-  const entry = await one<Record<string, unknown>>(
-    `SELECT * FROM actual_entry WHERE kpi_assignment_id = ? ORDER BY id DESC LIMIT 1`,
-    [id],
-  );
+  // Independent of each other — fired together instead of as sequential
+  // round trips, since each one adds real latency over a pooled connection
+  // and this runs once per row on every list/dashboard page.
+  const [period, entry, rubric, milestones, history, ai] = await Promise.all([
+    one<Period>(`SELECT * FROM period WHERE id = ?`, [k.period_id]),
+    one<Record<string, unknown>>(
+      `SELECT * FROM actual_entry WHERE kpi_assignment_id = ? ORDER BY id DESC LIMIT 1`,
+      [id],
+    ),
+    all<RubricLevel>(
+      `SELECT level, label, criteria_text, achievement_pct FROM rubric_level
+       WHERE kpi_assignment_id = ? ORDER BY level DESC`,
+      [id],
+    ),
+    all<Milestone>(
+      `SELECT title, sub_weight, due_date, completed_date FROM milestone
+       WHERE kpi_assignment_id = ? ORDER BY due_date`,
+      [id],
+    ),
+    all<ScoreRow>(
+      `SELECT s.id, s.calculated_pct, s.final_pct, s.formula, s.formula_version,
+              s.cap_applied, s.adjusted, s.reason, s.created_at, e.name AS created_by_name
+       FROM score s LEFT JOIN employee e ON e.id = s.created_by
+       WHERE s.kpi_assignment_id = ? ORDER BY s.id DESC`,
+      [id],
+    ),
+    latestSuggestion(id),
+  ]);
 
   const evidence = entry
     ? await all<EvidenceFile>(
@@ -127,26 +149,6 @@ export async function getRecord(id: number): Promise<KpiRecord | null> {
         [entry.id],
       )
     : [];
-
-  const rubric = await all<RubricLevel>(
-    `SELECT level, label, criteria_text, achievement_pct FROM rubric_level
-     WHERE kpi_assignment_id = ? ORDER BY level DESC`,
-    [id],
-  );
-
-  const milestones = await all<Milestone>(
-    `SELECT title, sub_weight, due_date, completed_date FROM milestone
-     WHERE kpi_assignment_id = ? ORDER BY due_date`,
-    [id],
-  );
-
-  const history = await all<ScoreRow>(
-    `SELECT s.id, s.calculated_pct, s.final_pct, s.formula, s.formula_version,
-            s.cap_applied, s.adjusted, s.reason, s.created_at, e.name AS created_by_name
-     FROM score s LEFT JOIN employee e ON e.id = s.created_by
-     WHERE s.kpi_assignment_id = ? ORDER BY s.id DESC`,
-    [id],
-  );
 
   const current = history.find((h) => h.final_pct !== null || h.calculated_pct !== null) ?? history[0] ?? null;
 
@@ -160,7 +162,7 @@ export async function getRecord(id: number): Promise<KpiRecord | null> {
     actual: (entry?.value as number) ?? null,
     milestones,
     rubric_pct: rubricPct,
-    as_of: period.end_date,
+    as_of: period!.end_date,
   });
 
   return {
@@ -172,7 +174,7 @@ export async function getRecord(id: number): Promise<KpiRecord | null> {
     unit: (k.unit as string) ?? null,
     weight: k.weight as number,
     state: k.state as State,
-    period,
+    period: period!,
     employee: {
       id: k.employee_id as number,
       name: k.emp_name as string,
@@ -202,7 +204,7 @@ export async function getRecord(id: number): Promise<KpiRecord | null> {
     formula: current?.formula ?? computed.formula,
     cap_applied: current ? current.cap_applied === 1 : computed.cap_applied,
 
-    ai: await latestSuggestion(id),
+    ai,
   };
 }
 
@@ -323,10 +325,12 @@ export async function dashboard(periodId: number): Promise<Dashboard> {
   let evaluated = 0;
   let pendingEmployees = 0;
   const totals: number[] = [];
-  for (const [empId, recs] of byEmployee) {
+  for (const recs of byEmployee.values()) {
     if (recs.every((r) => r.state === 'approved')) evaluated += 1;
     else pendingEmployees += 1;
-    const t = (await employeeTotal(empId, periodId)).total;
+    // Reuses the records already fetched into `allRecords` above, rather
+    // than calling employeeTotal() and re-fetching the same rows again.
+    const t = computeWeightedTotal(recs.map((r) => ({ achievement_pct: r.achievement_pct, weight: r.weight })));
     if (t.scored_weight > 0) totals.push((t.score / t.scored_weight) * 100);
   }
   const avgScore = totals.length
@@ -393,7 +397,9 @@ export async function dashboard(periodId: number): Promise<Dashboard> {
   const allPeriods = await all<Period>(`SELECT * FROM period ORDER BY id`);
   const trend = await Promise.all(
     allPeriods.map(async (p) => {
-      const recs = (await idsWhere(`SELECT id FROM kpi_assignment WHERE period_id = ?`, [p.id])).filter(
+      // Reuse allRecords for the period already fetched above instead of
+      // fetching the same full records over again.
+      const recs = (p.id === periodId ? allRecords : await idsWhere(`SELECT id FROM kpi_assignment WHERE period_id = ?`, [p.id])).filter(
         (r) => !r.pending,
       );
       return {
